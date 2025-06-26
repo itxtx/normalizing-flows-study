@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from torchdiffeq import odeint
 import numpy as np
 
@@ -439,38 +440,290 @@ class ContinuousFlow(nn.Module):
             result = x  # For now, just return the original input
             
         return result
-    
-class PlanarFlow(Flow):
+
+class SplineCouplingLayer(Flow):
     """
-    Implements a planar flow layer as described in "Variational Inference with
-    Normalizing Flows" by Rezende & Mohamed (2015).
+    Implements a coupling layer with a rational-quadratic spline transformation.
+    This layer follows the implementation described in the Neural Spline Flows paper
+    (https://arxiv.org/abs/1906.04032), which builds upon the method of
+    Gregory and Delbourgo.
     """
-    def __init__(self, dim):
-        super(PlanarFlow, self).__init__()
-        self.u = nn.Parameter(torch.randn(1, dim))
-        self.w = nn.Parameter(torch.randn(1, dim))
-        self.b = nn.Parameter(torch.randn(1))
+    def __init__(self, 
+                 data_dim, 
+                 hidden_dim, 
+                 mask, 
+                 num_bins=10, 
+                 bound=5.0,
+                 min_bin_width=1e-3,
+                 min_bin_height=1e-3,
+                 min_derivative=1e-3):
+        """
+        Initializes the SplineCouplingLayer.
+
+        Args:
+            data_dim (int): The dimensionality of the data.
+            hidden_dim (int): The number of hidden units in the conditioner network.
+            mask (torch.Tensor): A binary mask of shape (data_dim,) to separate
+                                 identity from transformed dimensions.
+            num_bins (int): The number of bins to use for the spline.
+            bound (float): The bound of the interval [-B, B] on which the spline is defined.
+                           Values outside this interval are identity-mapped.
+        """
+        super(SplineCouplingLayer, self).__init__()
+        
+        self.data_dim = data_dim
+        self.num_bins = num_bins
+        self.bound = bound
+        self.min_bin_width = min_bin_width
+        self.min_bin_height = min_bin_height
+        self.min_derivative = min_derivative
+
+        # The mask determines which dimensions are transformed (mask == 0) 
+        # and which are passed through as identity (mask == 1).
+        self.register_buffer('mask', mask)
+
+        # The conditioner network outputs the parameters for the splines.
+        # For each transformed dimension, we need K widths, K heights, and K-1 derivatives.
+        # Total parameters per transformed dimension = 3K - 1.
+        self.param_net = nn.Sequential(
+            nn.Linear(data_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, data_dim * (3 * num_bins - 1))
+        )
+
+    def _get_spline_params(self, z_a):
+        """
+        Computes and reshapes the spline parameters from the conditioner network.
+        
+        Args:
+            z_a (torch.Tensor): The masked input tensor.
+
+        Returns:
+            A tuple of (unnormalized_widths, unnormalized_heights, unnormalized_derivatives).
+        """
+        params = self.param_net(z_a)
+        params = params.view(-1, self.data_dim, 3 * self.num_bins - 1)
+        
+        # Split the output into the three parameter types
+        unnormalized_widths, unnormalized_heights, unnormalized_derivatives = torch.split(
+            params, [self.num_bins, self.num_bins, self.num_bins - 1], dim=-1
+        )
+        return unnormalized_widths, unnormalized_heights, unnormalized_derivatives
 
     def forward(self, z):
         """
-        Computes x = z + u * h(w^T * z + b)
+        Computes the forward pass x = f(z). (z -> x)
+        
+        Args:
+            z (torch.Tensor): The input tensor from the base distribution.
+        
+        Returns:
+            A tuple (x, log_det_J) where x is the transformed tensor and
+            log_det_J is the log of the absolute value of the Jacobian determinant.
         """
-        # Ensure invertibility condition
-        uw = torch.matmul(self.u, self.w.t())
-        u_hat = self.u + (-1 + torch.log(1 + torch.exp(uw))) - uw
+        # The identity part of the input is used to condition the transformation.
+        z_a = z * self.mask
         
-        # Compute the transformation
-        wz_b = torch.matmul(z, self.w.t()) + self.b
-        x = z + u_hat * torch.tanh(wz_b)
+        # Get spline parameters from the conditioner
+        unnormalized_widths, unnormalized_heights, unnormalized_derivatives = self._get_spline_params(z_a)
         
-        # Compute the log-determinant of the Jacobian
-        psi = (1 - torch.tanh(wz_b)**2) * self.w
-        log_det_jacobian = torch.log(torch.abs(1 + torch.matmul(psi, u_hat.t())))
+        # The transformation is applied to the other part of the input.
+        # We use (1 - mask) to select the dimensions to transform.
+        num_transformed_dims = int((self.mask == 0).sum())
+
+        # The spline function requires inputs to be 1D, so we flatten the batch/dim axes.
+        z_b_flat = z[:, self.mask == 0].reshape(-1)
+
+        # We also need the parameters corresponding to these dimensions, also flattened.
+        un_widths_flat = unnormalized_widths[:, self.mask == 0].reshape(-1, self.num_bins)
+        un_heights_flat = unnormalized_heights[:, self.mask == 0].reshape(-1, self.num_bins)
+        un_derivs_flat = unnormalized_derivatives[:, self.mask == 0].reshape(-1, self.num_bins - 1)
+
+        # Apply the spline transformation on the flattened data
+        x_b_transformed_flat, log_det_b_flat = self._rational_quadratic_spline(
+            inputs=z_b_flat,
+            unnormalized_widths=un_widths_flat,
+            unnormalized_heights=un_heights_flat,
+            unnormalized_derivatives=un_derivs_flat,
+            inverse=False
+        )
         
-        return x, log_det_jacobian
+        # Reshape the transformed part back to (batch_size, num_transformed_dims)
+        x_b_reshaped = x_b_transformed_flat.view(-1, num_transformed_dims)
+
+        # Reconstruct the output tensor
+        x = torch.empty_like(z)
+        x[:, self.mask == 1] = z[:, self.mask == 1] # Identity part
+        x[:, self.mask == 0] = x_b_reshaped         # Transformed part
+        
+        # Reshape and sum the log determinant
+        log_det_b_reshaped = log_det_b_flat.view(-1, num_transformed_dims)
+        log_det_J = log_det_b_reshaped.sum(dim=1)
+
+        return x, log_det_J
 
     def inverse(self, x):
         """
-        Planar flow does not have a simple analytical inverse.
+        Computes the inverse pass z = g(x). (x -> z)
+
+        Args:
+            x (torch.Tensor): The input tensor from the data distribution.
+
+        Returns:
+            A tuple (z, log_det_J_inv) where z is the reconstructed tensor and
+            log_det_J_inv is the log of the absolute value of the inverse Jacobian determinant.
         """
-        raise NotImplementedError
+        # The identity part is used for conditioning.
+        x_a = x * self.mask
+
+        # Get spline parameters
+        unnormalized_widths, unnormalized_heights, unnormalized_derivatives = self._get_spline_params(x_a)
+        
+        num_transformed_dims = int((self.mask == 0).sum())
+        
+        # Flatten the inputs and parameters for the spline function.
+        x_b_flat = x[:, self.mask == 0].reshape(-1)
+        un_widths_flat = unnormalized_widths[:, self.mask == 0].reshape(-1, self.num_bins)
+        un_heights_flat = unnormalized_heights[:, self.mask == 0].reshape(-1, self.num_bins)
+        un_derivs_flat = unnormalized_derivatives[:, self.mask == 0].reshape(-1, self.num_bins - 1)
+
+        # Apply the inverse spline transformation
+        z_b_transformed_flat, log_det_inv_b_flat = self._rational_quadratic_spline(
+            inputs=x_b_flat,
+            unnormalized_widths=un_widths_flat,
+            unnormalized_heights=un_heights_flat,
+            unnormalized_derivatives=un_derivs_flat,
+            inverse=True
+        )
+        
+        # Reshape the transformed part back
+        z_b_reshaped = z_b_transformed_flat.view(-1, num_transformed_dims)
+
+        # Reconstruct the output tensor
+        z = torch.empty_like(x)
+        z[:, self.mask == 1] = x[:, self.mask == 1] # Identity part
+        z[:, self.mask == 0] = z_b_reshaped          # Transformed part
+
+        # Reshape and sum the log determinants for each sample in the batch
+        log_det_inv_b_reshaped = log_det_inv_b_flat.view(-1, num_transformed_dims)
+        log_det_J_inv = log_det_inv_b_reshaped.sum(dim=1)
+
+        return z, log_det_J_inv
+
+    def _rational_quadratic_spline(self, inputs, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=False):
+        # --- Handle points outside the defined interval ---
+        inside_interval_mask = (inputs >= -self.bound) & (inputs <= self.bound)
+        outside_interval_mask = ~inside_interval_mask
+
+        outputs = torch.zeros_like(inputs)
+        logabsdet = torch.zeros_like(inputs)
+
+        # Identity map for points outside the interval
+        outputs[outside_interval_mask] = inputs[outside_interval_mask]
+        logabsdet[outside_interval_mask] = 0
+
+        # Proceed with points inside the interval
+        if not inside_interval_mask.any():
+            return outputs, logabsdet
+            
+        inputs_inside = inputs[inside_interval_mask]
+        
+        # --- Normalize parameters ---
+        # Select params for inside points. These will have shape (num_inside, num_bins) etc.
+        un_widths = unnormalized_widths[inside_interval_mask, :]
+        un_heights = unnormalized_heights[inside_interval_mask, :]
+        un_derivs = unnormalized_derivatives[inside_interval_mask, :]
+        
+        # Normalize widths and heights to sum to 2*bound and enforce minimums
+        widths = F.softmax(un_widths, dim=-1)
+        widths = self.min_bin_width + (1 - self.min_bin_width * self.num_bins) * widths
+        cum_widths = torch.cumsum(widths, dim=-1)
+        cum_widths = F.pad(cum_widths, pad=(1, 0), mode='constant', value=0.0)
+        cum_widths = (2 * self.bound) * cum_widths + (-self.bound)
+        cum_widths[..., 0] = -self.bound
+        cum_widths[..., -1] = self.bound
+        widths = cum_widths[..., 1:] - cum_widths[..., :-1]
+
+        heights = F.softmax(un_heights, dim=-1)
+        heights = self.min_bin_height + (1 - self.min_bin_height * self.num_bins) * heights
+        cum_heights = torch.cumsum(heights, dim=-1)
+        cum_heights = F.pad(cum_heights, pad=(1, 0), mode='constant', value=0.0)
+        cum_heights = (2 * self.bound) * cum_heights + (-self.bound)
+        cum_heights[..., 0] = -self.bound
+        cum_heights[..., -1] = self.bound
+        heights = cum_heights[..., 1:] - cum_heights[..., :-1]
+
+        # Normalize derivatives and pad with 1s at boundaries
+        derivatives = self.min_derivative + F.softplus(un_derivs)
+        derivatives = F.pad(derivatives, pad=(1, 1), mode='constant', value=1.0)
+        
+        # --- Find bin for each input and gather params ---
+        if inverse:
+            bin_idx = torch.searchsorted(cum_heights, inputs_inside[..., None]).squeeze(-1)
+        else:
+            bin_idx = torch.searchsorted(cum_widths, inputs_inside[..., None]).squeeze(-1)
+        
+        # Clamp to avoid out-of-bounds due to precision
+        bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
+
+        def gather_params(params, idx):
+            return torch.gather(params, -1, idx[..., None]).squeeze(-1)
+
+        input_cum_widths = gather_params(cum_widths, bin_idx)
+        input_widths = gather_params(widths, bin_idx)
+        input_cum_heights = gather_params(cum_heights, bin_idx)
+        input_heights = gather_params(heights, bin_idx)
+        input_delta_k = gather_params(derivatives, bin_idx)
+        input_delta_k_plus_1 = gather_params(derivatives, bin_idx + 1)
+        
+        s_k = input_heights / input_widths
+
+        # --- Apply Spline Transformation ---
+        if inverse:
+            # Solve for ξ in [0, 1] using Eq. 25-32
+            y = inputs_inside
+            y_k = input_cum_heights
+            
+            c = -s_k * (y - y_k)
+            b = input_heights * input_delta_k - (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
+            a = (input_heights * s_k) - (input_delta_k * input_heights) + (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
+
+            discriminant = b.pow(2) - 4 * a * c
+            discriminant = F.relu(discriminant) # Ensure non-negative
+
+            # Use numerically stable form for the root corresponding to ξ (Eq. 29)
+            # The root is (-b + sqrt(D)) / 2a = 2c / (-b - sqrt(D))
+            xi = (2 * c) / (-b - torch.sqrt(discriminant))
+            xi = torch.clamp(xi, 0, 1) # Clamp to handle precision errors
+
+            # Compute z (output) from ξ
+            outputs_inside = xi * input_widths + input_cum_widths
+            
+            # log|det(J_inv)| = -log|det(J)|, where J is the forward jacobian
+            # We calculate the forward derivative at the computed z and take -log()
+            # The denominator of the derivative:
+            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
+            # The numerator of the derivative:
+            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
+            logabsdet_inside = - (torch.log(numerator_logdet) - 2 * torch.log(denominator))
+
+        else: # Forward pass
+            # Compute ξ = (z - z_k) / w_k
+            xi = (inputs_inside - input_cum_widths) / input_widths
+            xi = torch.clamp(xi, 0, 1)
+
+            # Compute x (output) using Eq. 19
+            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
+            numerator = input_heights * (s_k * xi.pow(2) + input_delta_k * xi * (1 - xi))
+            outputs_inside = input_cum_heights + (numerator / denominator)
+
+            # Compute log derivative using Eq. 22
+            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
+            logabsdet_inside = torch.log(numerator_logdet) - 2 * torch.log(denominator)
+
+        outputs[inside_interval_mask] = outputs_inside
+        logabsdet[inside_interval_mask] = logabsdet_inside
+        
+        return outputs, logabsdet
