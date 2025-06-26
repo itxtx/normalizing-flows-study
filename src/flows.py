@@ -52,14 +52,13 @@ class MADE(nn.Module):
         can only be connected to input units with a strictly smaller degree.
         """
         masks = []
-        # Mask for input to hidden layer: shape should be (hidden_dim, input_dim)
-        # m_k(x_j) <= m_{k-1}(x_i)
+        # Mask for input to hidden layer: m_k(x_j) <= m_{k-1}(x_i)
+        # Transpose to get shape (hidden_dim, input_dim)
         mask1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
         masks.append(mask1)
-        
-        # Mask for hidden to output layer: shape should be (input_dim * output_dim_multiplier, hidden_dim)
-        # m_D(y_j) > m_k(x_i)
-        # We need to repeat the mask for each output dimension
+
+        # Mask for hidden to output layer: m_D(y_j) > m_k(x_i)
+        # Transpose to get shape (output_dim, hidden_dim)
         base_mask = (self.m[0][:, np.newaxis] < self.m[1][np.newaxis, :]).T
         # Repeat the mask for each output dimension multiplier
         mask2 = np.repeat(base_mask, self.output_dim_multiplier, axis=0)
@@ -249,24 +248,16 @@ class MaskedAutoregressiveFlow(Flow):
         # Iterate over each dimension to generate the sample
         for i in range(self.dim):
             # The conditioner's output for dim i depends only on x_1, ..., x_{i-1}
-            params = self.conditioner(x)
+            params = self.conditioner(x) # Pass the partially generated x
             mu, alpha = params.chunk(2, dim=1)
             
             # Clamp alpha to prevent numerical instability
             alpha = torch.clamp(alpha, min=-10, max=10)
             
             # Apply the transformation for the current dimension
-            x_i = z[:, i:i+1] * torch.exp(alpha[:, i:i+1]) + mu[:, i:i+1]
-            # Use clone to avoid in-place operations
-            x = x.clone()
-            x[:, i:i+1] = x_i
+            x[:, i] = z[:, i] * torch.exp(alpha[:, i]) + mu[:, i]
+            log_det_jacobian += alpha[:, i]
 
-        # The log determinant is the sum of alpha, which we can get from one final pass
-        final_params = self.conditioner(x)
-        _, final_alpha = final_params.chunk(2, dim=1)
-        final_alpha = torch.clamp(final_alpha, min=-10, max=10)
-        log_det_jacobian = torch.sum(final_alpha, dim=1)
-        
         return x, log_det_jacobian
 
 
@@ -695,7 +686,7 @@ class SplineCouplingLayer(Flow):
 
             # Use numerically stable form for the root corresponding to ξ (Eq. 29)
             # The root is (-b + sqrt(D)) / 2a = 2c / (-b - sqrt(D))
-            xi = (2 * c) / (-b - torch.sqrt(discriminant))
+            xi = (2 * c) / (-b - torch.sqrt(discriminant)) + 1e-6
             xi = torch.clamp(xi, 0, 1) # Clamp to handle precision errors
 
             # Compute z (output) from ξ
