@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from src.flows import CouplingLayer
+from src.flows import CouplingLayer, MaskedAutoregressiveFlow, InverseAutoregressiveFlow
 
 class RealNVP(nn.Module):
     """
