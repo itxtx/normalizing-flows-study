@@ -13,7 +13,7 @@ class RealNVP(nn.Module):
             n_layers (int): The number of coupling layers to stack.
             hidden_dim (int): The hidden dimension for the conditioner MLPs.
         """
-        super(RealNVP, self).__init__()
+        super().__init__()
         
         assert n_layers % 2 == 0, "Number of layers must be even to ensure all dimensions are transformed."
         
@@ -66,20 +66,19 @@ class RealNVPSpline(nn.Module):
             n_layers (int): The number of coupling layers to stack.
             hidden_dim (int): The hidden dimension for the conditioner MLPs.
         """
-        super(RealNVPSpline, self).__init__()
+        super().__init__()
         
         assert n_layers % 2 == 0, "Number of layers must be even to ensure all dimensions are transformed."
-        
-        # Create a sequence of coupling layers
         self.layers = nn.ModuleList()
+        # Define the two mask patterns once
+        mask_a = torch.zeros(data_dim)
+        mask_a[:data_dim // 2] = 1
+
+        mask_b = 1 - mask_a # A simple way to get the other half
+
         for i in range(n_layers):
-            # Create a general mask that splits dimensions in half.
-            mask = torch.zeros(data_dim)
-            if i % 2 == 0:
-                mask[:data_dim // 2] = 1 # Condition on the first half
-            else:
-                mask[data_dim // 2:] = 1 # Condition on the second half
-            
+            # Alternate between the two masks
+            mask = mask_a if i % 2 == 0 else mask_b
             self.layers.append(SplineCouplingLayer(data_dim, hidden_dim, mask))
 
     def forward(self, z):
@@ -113,7 +112,7 @@ class NormalizingFlowModel(nn.Module):
     A generic model to chain a sequence of normalizing flow layers.
     """
     def __init__(self, flows):
-        super(NormalizingFlowModel, self).__init__()
+        super().__init__()
         self.flows = nn.ModuleList(flows)
 
     def forward(self, z):

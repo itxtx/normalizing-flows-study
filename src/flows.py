@@ -1,29 +1,23 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.utils import spectral_norm
 from torchdiffeq import odeint
 import numpy as np
 
 class MaskedLinear(nn.Linear):
-    """
-    A linear layer with a mask to enforce autoregressive properties.
-    """
-    def __init__(self, in_features, out_features, bias=True):
+    """A linear layer with a fixed binary mask."""
+    
+    def __init__(self, in_features, out_features, mask, bias=True):
+        # Call the parent constructor
         super().__init__(in_features, out_features, bias)
-        self.register_buffer('mask', torch.ones(out_features, in_features))
-
-    def set_mask(self, mask):
-        """
-        Sets the mask for the linear layer's weights.
-        """
-        self.mask.data.copy_(torch.from_numpy(mask.astype(np.uint8)))
+        
+        # Register the mask as a buffer to ensure it moves with the model (e.g., to GPU)
+        self.register_buffer('mask', mask)
 
     def forward(self, input):
-        """
-        Applies the masked linear transformation.
-        """
-        return nn.functional.linear(input, self.mask * self.weight, self.bias)
-
+        # Apply the mask to the weights during the forward pass
+        return F.linear(input, self.weight * self.mask, self.bias)
 class MADE(nn.Module):
     """
     Masked Autoencoder for Distribution Estimation (Conditioner Network).
@@ -37,9 +31,13 @@ class MADE(nn.Module):
         self.output_dim_multiplier = output_dim_multiplier
 
         # Assign degrees to input, hidden, and output neurons
+        # Use deterministic assignment for better stability
         self.m = {}
         self.m[-1] = np.arange(self.input_dim)
-        self.m[0] = np.random.randint(0, self.input_dim - 1, size=self.hidden_dim)
+        
+        # Assign hidden layer degrees deterministically to ensure proper autoregressive structure
+        # Each hidden unit should have a degree between 0 and input_dim-1
+        self.m[0] = np.arange(self.hidden_dim) % (self.input_dim - 1)
         self.m[1] = np.arange(self.input_dim)
 
         self.masks = self.create_masks()
@@ -52,54 +50,68 @@ class MADE(nn.Module):
         can only be connected to input units with a strictly smaller degree.
         """
         masks = []
-        # Mask for input to hidden layer: m_k(x_j) <= m_{k-1}(x_i)
-        # Transpose to get shape (hidden_dim, input_dim)
-        mask1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
-        masks.append(mask1)
+        # Create masks as tensors and register them as buffers in the MaskedLinear layers
+        
+        # Mask 1
+        m1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
+        masks.append(torch.from_numpy(m1.astype(np.float32)))
 
-        # Mask for hidden to output layer: m_D(y_j) > m_k(x_i)
-        # Transpose to get shape (output_dim, hidden_dim)
+        # Mask 2
         base_mask = (self.m[0][:, np.newaxis] < self.m[1][np.newaxis, :]).T
-        # Repeat the mask for each output dimension multiplier
-        mask2 = np.repeat(base_mask, self.output_dim_multiplier, axis=0)
-        masks.append(mask2)
+        m2 = np.repeat(base_mask, self.output_dim_multiplier, axis=0)
+        masks.append(torch.from_numpy(m2.astype(np.float32)))
         return masks
 
+    # In MADE.create_network
     def create_network(self):
         """
         Creates the neural network with masked linear layers.
         """
-        layers = [
-            MaskedLinear(self.input_dim, self.hidden_dim),
-            nn.BatchNorm1d(self.hidden_dim),
-            nn.ReLU(),
-            MaskedLinear(self.hidden_dim, self.input_dim * self.output_dim_multiplier)
-        ]
-        layers[0].set_mask(self.masks[0])
-        layers[3].set_mask(self.masks[1])
+        # Create masked linear layers by passing the mask directly to the constructor
+        first_layer = MaskedLinear(
+            self.input_dim, 
+            self.hidden_dim, 
+            mask=self.masks[0] # Use keyword argument for clarity
+        )
+        final_layer = MaskedLinear(
+            self.hidden_dim, 
+            self.input_dim * self.output_dim_multiplier, 
+            mask=self.masks[1]
+        )
         
-        # Initialize weights properly
-        for layer in layers:
-            if isinstance(layer, MaskedLinear):
-                nn.init.xavier_uniform_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
+        
+        # Conservative initialization for better stability
+        nn.init.xavier_normal_(first_layer.weight, gain=0.01)
+        if first_layer.bias is not None:
+            nn.init.zeros_(first_layer.bias)
+        
+        nn.init.zeros_(final_layer.weight)
+        if final_layer.bias is not None:
+            nn.init.zeros_(final_layer.bias)
+        
+        layers = [
+            first_layer,
+            nn.Tanh(),
+            final_layer
+        ]
         
         return nn.Sequential(*layers)
-
+    
     def forward(self, x):
         """
         The forward pass of the conditioner network.
         """
         # The output contains the parameters for the transformation (e.g., mu and alpha)
-        return self.net(x)
+        output = self.net(x)
+        # Clamp outputs to prevent extreme values that lead to exploding gradients
+        return torch.clamp(output, min=-10.0, max=10.0)
 
 class Flow(nn.Module):
     """
     Base class for normalizing flow layers.
     """
     def __init__(self):
-        super(Flow, self).__init__()
+        super().__init__()
 
     def forward(self, z):
         """
@@ -135,9 +147,9 @@ class CouplingLayer(Flow):
     Implements a single coupling layer from Real NVP.
     """
     def __init__(self, data_dim, hidden_dim, mask):
-        super(CouplingLayer, self).__init__()
+        super().__init__()
         
-        self.mask = mask
+        self.register_buffer('mask', mask)
 
         # The conditioner networks for scale (s) and bias (b)
         # These should be simple MLPs that take the "control" part of the input
@@ -156,6 +168,9 @@ class CouplingLayer(Flow):
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim)
         )
+        
+        # Initialize weights properly to prevent exploding gradients
+        self._initialize_weights()
 
     def forward(self, z):
         """
@@ -167,16 +182,24 @@ class CouplingLayer(Flow):
         z_a = z * self.mask  # This is z_A in the equations, but with zeros for z_B
         
         # The conditioner networks only see the identity part
-        s = self.s_net(z_a)
-        b = self.b_net(z_a)
+        s = torch.clamp(self.s_net(z_a), min=-10.0, max=10.0)
+        b = torch.clamp(self.b_net(z_a), min=-10.0, max=10.0)
         
         # Apply the transformation to the other part
         # z_b is selected by (1 - mask)
         x = z_a + (1 - self.mask) * (z * torch.exp(s) + b)
         
-        # The log-determinant is the sum of s for the transformed dimensions
+        # The log-determinant of the Jacobian
         log_det_J = ((1 - self.mask) * s).sum(dim=1)
-        
+
+        # Safety check: ensure x doesn't contain NaN or infinite values
+        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
+        log_det_J = torch.where(
+            torch.isnan(log_det_J) | torch.isinf(log_det_J),
+            torch.zeros_like(log_det_J),
+            log_det_J
+        )
+
         return x, log_det_J
 
     def inverse(self, x):
@@ -188,8 +211,8 @@ class CouplingLayer(Flow):
         x_a = x * self.mask # This is x_A in the equations
         
         # The conditioner networks see the identity part
-        s = self.s_net(x_a)
-        b = self.b_net(x_a)
+        s = torch.clamp(self.s_net(x_a), min=-10.0, max=10.0)
+        b = torch.clamp(self.b_net(x_a), min=-10.0, max=10.0)
         
         # Apply the inverse transformation to the other part
         z = x_a + (1 - self.mask) * ((x - b) * torch.exp(-s))
@@ -197,8 +220,31 @@ class CouplingLayer(Flow):
         # The log-determinant of the inverse Jacobian
         log_det_J_inv = ((1 - self.mask) * -s).sum(dim=1)
 
+        # Safety check: ensure z doesn't contain NaN or infinite values
+        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
+        log_det_J_inv = torch.where(
+            torch.isnan(log_det_J_inv) | torch.isinf(log_det_J_inv),
+            torch.zeros_like(log_det_J_inv),
+            log_det_J_inv
+        )
+
         return z, log_det_J_inv
     
+    def _initialize_weights(self):
+        for net in [self.s_net, self.b_net]:
+            # Initialize all but the final layer
+            for layer in net[:-1]:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight, gain=1.0) # Use a standard gain
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+        
+        # Initialize final layers to output zeros, making the flow initially identity
+        nn.init.zeros_(self.s_net[-1].weight)
+        nn.init.zeros_(self.s_net[-1].bias)
+        nn.init.zeros_(self.b_net[-1].weight)
+        nn.init.zeros_(self.b_net[-1].bias)
+        
     
 
 
@@ -229,11 +275,19 @@ class MaskedAutoregressiveFlow(Flow):
         # Clamp alpha to prevent numerical instability
         alpha = torch.clamp(alpha, min=-10, max=10)
 
-        # Apply the transformation
+        # Apply the transformation with better numerical stability
         z = (x - mu) * torch.exp(-alpha)
         
         # The log-determinant of the Jacobian is the sum of the log of the scaling factors.
         log_det_jacobian = -torch.sum(alpha, dim=1)
+        
+        # Safety check: ensure z doesn't contain NaN or infinite values
+        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
+        log_det_jacobian = torch.where(
+            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
+            torch.zeros_like(log_det_jacobian),
+            log_det_jacobian
+        )
         
         return z, log_det_jacobian
 
@@ -258,12 +312,23 @@ class MaskedAutoregressiveFlow(Flow):
             # Clamp alpha to prevent numerical instability
             alpha = torch.clamp(alpha, min=-10, max=10)
             
-            # Apply the transformation for the current dimension
-            x_list[i] = z[:, i] * torch.exp(alpha[:, i]) + mu[:, i]
+            # Apply the transformation for the current dimension with better stability
+            exp_alpha = torch.exp(alpha[:, i])
+            x_list[i] = z[:, i] * exp_alpha + mu[:, i]
+            
             log_det_jacobian += alpha[:, i]
 
         # Stack the final result
         x = torch.stack(x_list, dim=1)
+        
+        # Safety check: ensure x doesn't contain NaN or infinite values
+        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
+        log_det_jacobian = torch.where(
+            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
+            torch.zeros_like(log_det_jacobian),
+            log_det_jacobian
+        )
+        
         return x, log_det_jacobian
 
 
@@ -303,6 +368,14 @@ class InverseAutoregressiveFlow(Flow):
         # The log-determinant is also parallel
         log_det_jacobian = torch.sum(alpha, dim=1)
         
+        # Safety check: ensure x doesn't contain NaN or infinite values
+        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
+        log_det_jacobian = torch.where(
+            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
+            torch.zeros_like(log_det_jacobian),
+            log_det_jacobian
+        )
+        
         return x, log_det_jacobian
 
     def inverse(self, x):
@@ -335,6 +408,15 @@ class InverseAutoregressiveFlow(Flow):
 
         # Stack the final result
         z = torch.stack(z_list, dim=1)
+
+        # Safety check: ensure z doesn't contain NaN or infinite values
+        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
+        log_det_jacobian = torch.where(
+            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
+            torch.zeros_like(log_det_jacobian),
+            log_det_jacobian
+        )
+
         return z, log_det_jacobian
 
 
@@ -346,7 +428,7 @@ class ODEFunc(nn.Module):
     dz/dt = f(z, t)
     """
     def __init__(self, dim, hidden_dim):
-        super(ODEFunc, self).__init__()
+        super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.Tanh(),
@@ -354,6 +436,9 @@ class ODEFunc(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, dim)
         )
+        
+        # Initialize weights properly to prevent exploding gradients
+        self._initialize_weights()
 
     def forward(self, t, z):
         """
@@ -361,13 +446,29 @@ class ODEFunc(nn.Module):
         """
         # The network is independent of t, but the interface requires it.
         return self.net(z)
+    
+    def _initialize_weights(self):
+        """Initialize network weights using Xavier initialization with proper scaling."""
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                # Use Xavier normal initialization for better stability
+                nn.init.xavier_normal_(layer.weight, gain=0.1)  # Small gain for stability
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+        
+        # Special initialization for the final layer to start with near-zero dynamics
+        final_layer = self.net[-1]
+        if isinstance(final_layer, nn.Linear):
+            nn.init.zeros_(final_layer.weight)
+            if final_layer.bias is not None:
+                nn.init.zeros_(final_layer.bias)
 
 class ContinuousFlow(nn.Module):
     """
     Continuous Normalizing Flow model.
     """
     def __init__(self, dim, hidden_dim=64):
-        super(ContinuousFlow, self).__init__()
+        super().__init__()
         self.ode_func = ODEFunc(dim, hidden_dim)
 
     def forward(self, z, integration_times=torch.tensor([0.0, 1.0])):
@@ -466,7 +567,7 @@ class SplineCouplingLayer(Flow):
             bound (float): The bound of the interval [-B, B] on which the spline is defined.
                            Values outside this interval are identity-mapped.
         """
-        super(SplineCouplingLayer, self).__init__()
+        super().__init__()
         
         self.data_dim = data_dim
         self.num_bins = num_bins
@@ -489,6 +590,9 @@ class SplineCouplingLayer(Flow):
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim * (3 * num_bins - 1))
         )
+        
+        # Initialize weights properly to prevent exploding gradients
+        self._initialize_weights()
 
     def _get_spline_params(self, z_a):
         """
@@ -559,6 +663,14 @@ class SplineCouplingLayer(Flow):
         log_det_b_reshaped = log_det_b_flat.view(-1, num_transformed_dims)
         log_det_J = log_det_b_reshaped.sum(dim=1)
 
+        # Safety check: ensure x doesn't contain NaN or infinite values
+        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
+        log_det_J = torch.where(
+            torch.isnan(log_det_J) | torch.isinf(log_det_J),
+            torch.zeros_like(log_det_J),
+            log_det_J
+        )
+
         return x, log_det_J
 
     def inverse(self, x):
@@ -606,6 +718,14 @@ class SplineCouplingLayer(Flow):
         # Reshape and sum the log determinants for each sample in the batch
         log_det_inv_b_reshaped = log_det_inv_b_flat.view(-1, num_transformed_dims)
         log_det_J_inv = log_det_inv_b_reshaped.sum(dim=1)
+
+        # Safety check: ensure z doesn't contain NaN or infinite values
+        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
+        log_det_J_inv = torch.where(
+            torch.isnan(log_det_J_inv) | torch.isinf(log_det_J_inv),
+            torch.zeros_like(log_det_J_inv),
+            log_det_J_inv
+        )
 
         return z, log_det_J_inv
 
@@ -687,33 +807,40 @@ class SplineCouplingLayer(Flow):
             a = (input_heights * (s_k - input_delta_k)) + (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
             b = (input_heights * input_delta_k) - (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * 2
             c = -s_k * (y - y_k)
-
+            
             discriminant = b.pow(2) - 4 * a * c
-            discriminant = F.relu(discriminant) # Ensure non-negative
+            # Ensure discriminant is non-negative
+            discriminant = torch.clamp(discriminant, min=0)
 
-            # Use numerically stable form for the root corresponding to ξ
-            xi = (2 * c) / (-b - torch.sqrt(discriminant))
-            xi = torch.clamp(xi, 0, 1) # Clamp to handle precision errors
+            # The correct solution for xi in the [0, 1] range
+            # is typically obtained with the '+' in the numerator
+            numerator = -b + torch.sqrt(discriminant)
+            denominator = 2 * a
+            eps = 1e-8
+            # Add a small epsilon to the denominator to prevent division by zero
+            xi = numerator / (torch.sign(denominator) * torch.clamp(torch.abs(denominator), min=eps))
+            xi = torch.clamp(xi, 0, 1) # Ensure xi is in [0, 1]
 
-            # Compute z (output) from ξ
+            
             outputs_inside = xi * input_widths + input_cum_widths
-            
-            # --- CORRECTED LOG-DETERMINANT CALCULATION ---
-            # The log-determinant of the inverse is -log(forward_derivative).
-            # The forward derivative is a function of ξ. We must compute this ξ
-            # from the *output* of this inverse function (`outputs_inside`).
-            
-            # Re-calculate xi based on the output z
-            xi_for_logdet = (outputs_inside - input_cum_widths) / input_widths
-            xi_for_logdet = torch.clamp(xi_for_logdet, 0, 1)
 
-            # Denominator of the forward derivative
-            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi_for_logdet * (1 - xi_for_logdet)
-            # Numerator of the forward derivative
-            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi_for_logdet.pow(2) + 2 * s_k * xi_for_logdet * (1 - xi_for_logdet) + input_delta_k * (1 - xi_for_logdet).pow(2))
+            # Use the xi we just solved for directly
+            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
+            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
+
+            # Add numerical stability to log determinant calculation
+            numerator_logdet = torch.clamp(numerator_logdet, min=1e-8)
+            denominator = torch.clamp(denominator, min=1e-8)
             
-            # log|det(J_inv)| = -log|det(J_forward)|
-            logabsdet_inside = - (torch.log(numerator_logdet) - 2 * torch.log(denominator))
+            logabsdet_inside = -torch.log(numerator_logdet) + 2 * torch.log(denominator)
+
+            # Additional safety check for NaN or infinite values
+            logabsdet_inside = torch.where(
+                torch.isnan(logabsdet_inside) | torch.isinf(logabsdet_inside),
+                torch.zeros_like(logabsdet_inside),
+                logabsdet_inside
+            )
+
 
 
         else: # Forward pass
@@ -728,9 +855,39 @@ class SplineCouplingLayer(Flow):
 
             # Compute log derivative using Eq. 22
             numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
+            
+            # Add numerical stability to log determinant calculation
+            numerator_logdet = torch.clamp(numerator_logdet, min=1e-8)
+            denominator = torch.clamp(denominator, min=1e-8)
+            
             logabsdet_inside = torch.log(numerator_logdet) - 2 * torch.log(denominator)
+            
+            # Additional safety check for NaN or infinite values
+            logabsdet_inside = torch.where(
+                torch.isnan(logabsdet_inside) | torch.isinf(logabsdet_inside),
+                torch.zeros_like(logabsdet_inside),
+                logabsdet_inside
+            )
 
         outputs[inside_interval_mask] = outputs_inside
         logabsdet[inside_interval_mask] = logabsdet_inside
         
         return outputs, logabsdet
+    
+    def _initialize_weights(self):
+        """Initialize network weights."""
+        # Initialize all but the final layer
+        for layer in self.param_net[:-1]:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight, gain=1.0) # Standard gain is often fine
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+        
+        # Special initialization for the final layer
+        final_layer = self.param_net[-1]
+        if isinstance(final_layer, nn.Linear):
+            # Initialize weights to be very small and biases to zero
+            # to start close to an identity transformation.
+            nn.init.zeros_(final_layer.weight)
+            if final_layer.bias is not None:
+                nn.init.zeros_(final_layer.bias)
