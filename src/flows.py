@@ -242,22 +242,28 @@ class MaskedAutoregressiveFlow(Flow):
         Computes x = f(z). This direction is slow as it must be done sequentially.
         x_i = z_i * exp(alpha_i) + mu_i
         """
-        x = torch.zeros_like(z)
-        log_det_jacobian = torch.zeros(z.size(0), device=z.device)
+        batch_size = z.size(0)
+        x_list = [torch.zeros(batch_size, device=z.device) for _ in range(self.dim)]
+        log_det_jacobian = torch.zeros(batch_size, device=z.device)
 
         # Iterate over each dimension to generate the sample
         for i in range(self.dim):
+            # Build the current x tensor from the list
+            x_current = torch.stack(x_list, dim=1)
+            
             # The conditioner's output for dim i depends only on x_1, ..., x_{i-1}
-            params = self.conditioner(x) # Pass the partially generated x
+            params = self.conditioner(x_current) # Pass the partially generated x
             mu, alpha = params.chunk(2, dim=1)
             
             # Clamp alpha to prevent numerical instability
             alpha = torch.clamp(alpha, min=-10, max=10)
             
             # Apply the transformation for the current dimension
-            x[:, i] = z[:, i] * torch.exp(alpha[:, i]) + mu[:, i]
+            x_list[i] = z[:, i] * torch.exp(alpha[:, i]) + mu[:, i]
             log_det_jacobian += alpha[:, i]
 
+        # Stack the final result
+        x = torch.stack(x_list, dim=1)
         return x, log_det_jacobian
 
 
@@ -304,31 +310,31 @@ class InverseAutoregressiveFlow(Flow):
         Computes z = g(x). This is slow and sequential.
         z_i = (x_i - mu_i) * exp(-alpha_i)
         """
-        z = torch.zeros_like(x)
-        log_det_jacobian = torch.zeros(x.size(0), device=x.device)
+        batch_size = x.size(0)
+        z_list = [torch.zeros(batch_size, device=x.device) for _ in range(self.dim)]
+        log_det_jacobian = torch.zeros(batch_size, device=x.device)
 
         # Iterate over each dimension
         for i in range(self.dim):
+            # Build the current z tensor from the list
+            z_current = torch.stack(z_list, dim=1)
+            
             # The conditioner's output depends on z_1, ..., z_{i-1}, which we have
             # already computed.
-            params = self.conditioner(z)
+            params = self.conditioner(z_current)
             mu, alpha = params.chunk(2, dim=1)
             
             # Clamp alpha to prevent numerical instability
             alpha = torch.clamp(alpha, min=-10, max=10)
             
             # Apply the inverse transformation for the current dimension
-            z_i = (x[:, i:i+1] - mu[:, i:i+1]) * torch.exp(-alpha[:, i:i+1])
-            # Use scatter_ to update the i-th column without in-place operations
-            z = z.clone()
-            z[:, i:i+1] = z_i
+            z_list[i] = (x[:, i] - mu[:, i]) * torch.exp(-alpha[:, i])
             
-        # The log determinant of the inverse is the negative sum of alpha.
-        final_params = self.conditioner(z)
-        _, final_alpha = final_params.chunk(2, dim=1)
-        final_alpha = torch.clamp(final_alpha, min=-10, max=10)
-        log_det_jacobian = -torch.sum(final_alpha, dim=1)
+            # Accumulate the log-determinant from this step's alpha
+            log_det_jacobian -= alpha[:, i]
 
+        # Stack the final result
+        z = torch.stack(z_list, dim=1)
         return z, log_det_jacobian
 
 
@@ -677,28 +683,38 @@ class SplineCouplingLayer(Flow):
             y = inputs_inside
             y_k = input_cum_heights
             
+            # Coefficients for the quadratic equation aξ^2 + bξ + c = 0
+            a = (input_heights * (s_k - input_delta_k)) + (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
+            b = (input_heights * input_delta_k) - (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * 2
             c = -s_k * (y - y_k)
-            b = input_heights * input_delta_k - (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
-            a = (input_heights * s_k) - (input_delta_k * input_heights) + (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
 
             discriminant = b.pow(2) - 4 * a * c
             discriminant = F.relu(discriminant) # Ensure non-negative
 
-            # Use numerically stable form for the root corresponding to ξ (Eq. 29)
-            # The root is (-b + sqrt(D)) / 2a = 2c / (-b - sqrt(D))
-            xi = (2 * c) / (-b - torch.sqrt(discriminant)) + 1e-6
+            # Use numerically stable form for the root corresponding to ξ
+            xi = (2 * c) / (-b - torch.sqrt(discriminant))
             xi = torch.clamp(xi, 0, 1) # Clamp to handle precision errors
 
             # Compute z (output) from ξ
             outputs_inside = xi * input_widths + input_cum_widths
             
-            # log|det(J_inv)| = -log|det(J)|, where J is the forward jacobian
-            # We calculate the forward derivative at the computed z and take -log()
-            # The denominator of the derivative:
-            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
-            # The numerator of the derivative:
-            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
+            # --- CORRECTED LOG-DETERMINANT CALCULATION ---
+            # The log-determinant of the inverse is -log(forward_derivative).
+            # The forward derivative is a function of ξ. We must compute this ξ
+            # from the *output* of this inverse function (`outputs_inside`).
+            
+            # Re-calculate xi based on the output z
+            xi_for_logdet = (outputs_inside - input_cum_widths) / input_widths
+            xi_for_logdet = torch.clamp(xi_for_logdet, 0, 1)
+
+            # Denominator of the forward derivative
+            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi_for_logdet * (1 - xi_for_logdet)
+            # Numerator of the forward derivative
+            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi_for_logdet.pow(2) + 2 * s_k * xi_for_logdet * (1 - xi_for_logdet) + input_delta_k * (1 - xi_for_logdet).pow(2))
+            
+            # log|det(J_inv)| = -log|det(J_forward)|
             logabsdet_inside = - (torch.log(numerator_logdet) - 2 * torch.log(denominator))
+
 
         else: # Forward pass
             # Compute ξ = (z - z_k) / w_k
