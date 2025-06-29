@@ -278,15 +278,13 @@ class TestNumericalStability:
             x = x.clone().detach().requires_grad_(True)
             
             if isinstance(flow, ContinuousFlow):
-                # ContinuousFlow has different interface - no log_det return
+                # ContinuousFlow returns (x, log_det_J) like other flows
                 if operation_name == "forward":
                     result, exec_time = self.benchmarker.benchmark_function(flow.forward, x)
-                    output = result
-                    log_det = None
+                    output, log_det = result
                 elif operation_name == "inverse":
                     result, exec_time = self.benchmarker.benchmark_function(flow.inverse, x)
-                    output = result  
-                    log_det = None
+                    output, log_det = result
                 else:
                     return issues, timings
             else:

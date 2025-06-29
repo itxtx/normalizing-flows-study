@@ -77,17 +77,7 @@ class TestInvertibility:
         try:
             # Test forward-inverse consistency: x -> z -> x'
             if isinstance(flow, ContinuousFlow):
-                # ContinuousFlow has different interface - no log_det return
-                z = flow.inverse(x_original)
-                x_reconstructed = flow.forward(z)
-                
-                # Check reconstruction accuracy
-                if not torch.allclose(x_original, x_reconstructed, atol=1e-5):
-                    pytest.fail(f"**critical-bug** Forward-inverse consistency failed for {type(flow).__name__}: "
-                              f"max error = {torch.max(torch.abs(x_original - x_reconstructed)).item():.2e}")
-                              
-            else:
-                # Standard flow interface with log_det
+                # ContinuousFlow returns (x, log_det_J) like other flows
                 z, log_det_inv = flow.inverse(x_original)
                 x_reconstructed, log_det_fwd = flow.forward(z)
                 
@@ -120,17 +110,7 @@ class TestInvertibility:
         try:
             # Test inverse-forward consistency: z -> x -> z'
             if isinstance(flow, ContinuousFlow):
-                # ContinuousFlow has different interface
-                x = flow.forward(z_original)
-                z_reconstructed = flow.inverse(x)
-                
-                # Check reconstruction accuracy
-                if not torch.allclose(z_original, z_reconstructed, atol=1e-5):
-                    pytest.fail(f"**critical-bug** Inverse-forward consistency failed for {type(flow).__name__}: "
-                              f"max error = {torch.max(torch.abs(z_original - z_reconstructed)).item():.2e}")
-                              
-            else:
-                # Standard flow interface
+                # ContinuousFlow returns (x, log_det_J) like other flows
                 x, log_det_fwd = flow.forward(z_original)
                 z_reconstructed, log_det_inv = flow.inverse(x)
                 
@@ -148,7 +128,7 @@ class TestInvertibility:
         except Exception as e:
             pytest.fail(f"**critical-bug** Exception during invertibility test for {type(flow).__name__}: {str(e)}")
     
-    @pytest.mark.parametrize("flow", [f for f in get_all_flow_classes() if not isinstance(f, ContinuousFlow)])
+    @pytest.mark.parametrize("flow", get_all_flow_classes())
     def test_log_determinant_symmetry(self, flow):
         """Test that log_det_jacobian relationships hold correctly."""
         torch.manual_seed(456)

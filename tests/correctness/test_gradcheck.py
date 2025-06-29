@@ -109,7 +109,8 @@ def create_flow_forward_function(flow):
     def forward_fn(x):
         x = x.requires_grad_(True)
         if isinstance(flow, ContinuousFlow):
-            return flow.forward(x)
+            output, _ = flow.forward(x)
+            return output
         else:
             output, _ = flow.forward(x)
             return output
@@ -121,7 +122,8 @@ def create_flow_inverse_function(flow):
     def inverse_fn(x):
         x = x.requires_grad_(True)
         if isinstance(flow, ContinuousFlow):
-            return flow.inverse(x)
+            output, _ = flow.inverse(x)
+            return output
         else:
             output, _ = flow.inverse(x)
             return output
@@ -199,7 +201,7 @@ class TestGradCheck:
         except Exception as e:
             pytest.fail(f"**critical-bug** Exception during inverse gradient check for {type(flow).__name__}: {str(e)}")
     
-    @pytest.mark.parametrize("flow", [f for f in get_all_flow_classes_for_gradcheck() if not isinstance(f, ContinuousFlow)])
+    @pytest.mark.parametrize("flow", get_all_flow_classes_for_gradcheck())
     def test_log_det_gradcheck(self, flow):
         """Test gradient correctness for log determinant computation."""
         torch.manual_seed(456)
@@ -268,8 +270,8 @@ class TestGradCheck:
         try:
             # Forward pass
             if isinstance(flow, ContinuousFlow):
-                output = flow.forward(input_tensor)
-                loss = torch.sum(output ** 2)
+                output, log_det = flow.forward(input_tensor)
+                loss = torch.sum(output ** 2) + torch.sum(log_det ** 2)
             else:
                 output, log_det = flow.forward(input_tensor)
                 loss = torch.sum(output ** 2) + torch.sum(log_det ** 2)

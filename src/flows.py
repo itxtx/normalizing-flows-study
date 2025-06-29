@@ -424,11 +424,12 @@ class InverseAutoregressiveFlow(Flow):
 
 class ODEFunc(nn.Module):
     """
-    Defines the dynamics of the continuous flow.
-    dz/dt = f(z, t)
+    Defines the dynamics of the continuous flow with augmented state.
+    The augmented state includes both the input z and the log-determinant.
     """
     def __init__(self, dim, hidden_dim):
         super().__init__()
+        self.dim = dim
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.Tanh(),
@@ -440,12 +441,58 @@ class ODEFunc(nn.Module):
         # Initialize weights properly to prevent exploding gradients
         self._initialize_weights()
 
-    def forward(self, t, z):
+    def forward(self, t, augmented_state):
         """
         The forward pass of the ODE function.
+        
+        Args:
+            t: time (not used in this implementation)
+            augmented_state: concatenated tensor [z, log_det] where z is the state
+                           and log_det is the accumulated log-determinant
+        
+        Returns:
+            concatenated tensor [dz/dt, dlog_det/dt]
         """
-        # The network is independent of t, but the interface requires it.
-        return self.net(z)
+        # Split the augmented state
+        z = augmented_state[:, :self.dim]
+        log_det = augmented_state[:, self.dim:]
+        
+        # Compute the dynamics dz/dt = f(z, t)
+        dz_dt = self.net(z)
+        
+        # Compute the trace of the Jacobian using Hutchinson's estimator
+        # Use multiple random vectors for better accuracy
+        batch_size = z.size(0)
+        device = z.device
+        
+        # Use 3 random vectors for better accuracy (trade-off between speed and accuracy)
+        num_vectors = 3
+        trace_estimate = 0.0
+        
+        for _ in range(num_vectors):
+            # Sample random vector from standard normal
+            epsilon = torch.randn_like(z)
+            
+            # Compute the Jacobian-vector product using autograd
+            # Create a copy of z to avoid modifying the original
+            z_copy = z.clone().detach().requires_grad_(True)
+            f_z = self.net(z_copy)
+            jvp = torch.autograd.grad(
+                f_z.sum(), z_copy, create_graph=True, retain_graph=True
+            )[0]
+            
+            # Compute the trace contribution
+            trace_contribution = (jvp * epsilon).sum(dim=1, keepdim=True)
+            trace_estimate += trace_contribution
+        
+        # Average the trace estimates
+        trace = trace_estimate / num_vectors
+        
+        # The change in log-determinant is the trace
+        dlog_det_dt = trace
+        
+        # Return the concatenated result
+        return torch.cat([dz_dt, dlog_det_dt], dim=1)
     
     def _initialize_weights(self):
         """Initialize network weights using Xavier initialization with proper scaling."""
@@ -465,79 +512,138 @@ class ODEFunc(nn.Module):
 
 class ContinuousFlow(nn.Module):
     """
-    Continuous Normalizing Flow model.
+    Continuous Normalizing Flow model with proper log-determinant calculation.
     """
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
+        self.dim = dim
         self.ode_func = ODEFunc(dim, hidden_dim)
 
     def forward(self, z, integration_times=torch.tensor([0.0, 1.0])):
         """
         Forward pass (sampling). Solves the ODE from t=0 to t=1.
+        
+        Args:
+            z: input tensor from base distribution
+            integration_times: time points for integration
+            
+        Returns:
+            tuple (x, log_det_J) where x is the transformed tensor and
+            log_det_J is the log-determinant of the Jacobian
         """
+        batch_size = z.size(0)
+        device = z.device
+        
+        # Create augmented state: [z, log_det]
+        # Initialize log_det to zero
+        log_det_init = torch.zeros(batch_size, 1, device=device)
+        augmented_state = torch.cat([z, log_det_init], dim=1)
+        
         # Ensure integration_times is valid for torchdiffeq
         if integration_times[0] == integration_times[1]:
             # If start and end times are the same, return the input unchanged
-            return z
+            return z, torch.zeros(batch_size, device=device)
         
-        # Ensure integration_times is strictly increasing or decreasing
-        if integration_times[0] > integration_times[1]:
-            # If decreasing, reverse the times and the result
-            integration_times = torch.flip(integration_times, [0])
-            reverse_result = True
-        else:
-            reverse_result = False
-            
-        x = odeint(
-            self.ode_func,
-            z,
-            integration_times,
-            method='dopri5',
-            atol=1e-5,
-            rtol=1e-5
+        # Ensure integration_times is on the correct device
+        integration_times = integration_times.to(device)
+        
+        # Solve the ODE with augmented state
+        try:
+            solution = odeint(
+                self.ode_func,
+                augmented_state,
+                integration_times,
+                method='dopri5',
+                atol=1e-5,
+                rtol=1e-5
+            )
+        except Exception as e:
+            # Fallback to simpler solver if dopri5 fails
+            solution = odeint(
+                self.ode_func,
+                augmented_state,
+                integration_times,
+                method='rk4',
+                options={'step_size': 0.01}
+            )
+        
+        # Extract the final state
+        final_augmented_state = solution[-1]
+        x = final_augmented_state[:, :self.dim]
+        log_det_J = final_augmented_state[:, self.dim:].squeeze(-1)
+        
+        # Safety check: ensure x doesn't contain NaN or infinite values
+        x = torch.where(torch.isnan(x) | torch.isinf(x), z, x)
+        log_det_J = torch.where(
+            torch.isnan(log_det_J) | torch.isinf(log_det_J),
+            torch.zeros_like(log_det_J),
+            log_det_J
         )
         
-        result = x[-1]
-        if reverse_result:
-            # If we reversed the integration, we need to reverse the result
-            # This is a simplified approach - in practice, you might need more sophisticated handling
-            result = z  # For now, just return the original input
-            
-        return result
+        return x, log_det_J
 
     def inverse(self, x, integration_times=torch.tensor([1.0, 0.0])):
         """
         Inverse pass (likelihood). Solves the ODE from t=1 to t=0.
+        
+        Args:
+            x: input tensor from data distribution
+            integration_times: time points for integration
+            
+        Returns:
+            tuple (z, log_det_J_inv) where z is the reconstructed tensor and
+            log_det_J_inv is the log-determinant of the inverse Jacobian
         """
+        batch_size = x.size(0)
+        device = x.device
+        
+        # Create augmented state: [x, log_det]
+        # Initialize log_det to zero
+        log_det_init = torch.zeros(batch_size, 1, device=device)
+        augmented_state = torch.cat([x, log_det_init], dim=1)
+        
         # Ensure integration_times is valid for torchdiffeq
         if integration_times[0] == integration_times[1]:
             # If start and end times are the same, return the input unchanged
-            return x
+            return x, torch.zeros(batch_size, device=device)
         
-        # Ensure integration_times is strictly increasing or decreasing
-        if integration_times[0] < integration_times[1]:
-            # If increasing, reverse the times and the result
-            integration_times = torch.flip(integration_times, [0])
-            reverse_result = True
-        else:
-            reverse_result = False
-            
-        z = odeint(
-            self.ode_func,
-            x,
-            integration_times,
-            method='dopri5',
-            atol=1e-5,
-            rtol=1e-5
+        # Ensure integration_times is on the correct device
+        integration_times = integration_times.to(device)
+        
+        # Solve the ODE with augmented state
+        try:
+            solution = odeint(
+                self.ode_func,
+                augmented_state,
+                integration_times,
+                method='dopri5',
+                atol=1e-5,
+                rtol=1e-5
+            )
+        except Exception as e:
+            # Fallback to simpler solver if dopri5 fails
+            solution = odeint(
+                self.ode_func,
+                augmented_state,
+                integration_times,
+                method='rk4',
+                options={'step_size': 0.01}
+            )
+        
+        # Extract the final state
+        final_augmented_state = solution[-1]
+        z = final_augmented_state[:, :self.dim]
+        log_det_J_inv = final_augmented_state[:, self.dim:].squeeze(-1)
+        
+        # Safety check: ensure z doesn't contain NaN or infinite values
+        z = torch.where(torch.isnan(z) | torch.isinf(z), x, z)
+        log_det_J_inv = torch.where(
+            torch.isnan(log_det_J_inv) | torch.isinf(log_det_J_inv),
+            torch.zeros_like(log_det_J_inv),
+            log_det_J_inv
         )
         
-        result = z[-1]
-        if reverse_result:
-            # If we reversed the integration, we need to reverse the result
-            # This is a simplified approach - in practice, you might need more sophisticated handling
-            result = x  # For now, just return the original input
-            
-        return result
+        return z, log_det_J_inv
 
 class SplineCouplingLayer(Flow):
     """
@@ -634,34 +740,30 @@ class SplineCouplingLayer(Flow):
         # We use (1 - mask) to select the dimensions to transform.
         num_transformed_dims = int((self.mask == 0).sum())
 
-        # The spline function requires inputs to be 1D, so we flatten the batch/dim axes.
-        z_b_flat = z[:, self.mask == 0].reshape(-1)
+        # Extract the transformed dimensions without flattening batch
+        z_b = z[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims)
+        
+        # Extract parameters for transformed dimensions
+        un_widths_b = unnormalized_widths[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins)
+        un_heights_b = unnormalized_heights[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins)
+        un_derivs_b = unnormalized_derivatives[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins-1)
 
-        # We also need the parameters corresponding to these dimensions, also flattened.
-        un_widths_flat = unnormalized_widths[:, self.mask == 0].reshape(-1, self.num_bins)
-        un_heights_flat = unnormalized_heights[:, self.mask == 0].reshape(-1, self.num_bins)
-        un_derivs_flat = unnormalized_derivatives[:, self.mask == 0].reshape(-1, self.num_bins - 1)
-
-        # Apply the spline transformation on the flattened data
-        x_b_transformed_flat, log_det_b_flat = self._rational_quadratic_spline(
-            inputs=z_b_flat,
-            unnormalized_widths=un_widths_flat,
-            unnormalized_heights=un_heights_flat,
-            unnormalized_derivatives=un_derivs_flat,
+        # Apply the spline transformation on the batched data
+        x_b_transformed, log_det_b = self._rational_quadratic_spline(
+            inputs=z_b,
+            unnormalized_widths=un_widths_b,
+            unnormalized_heights=un_heights_b,
+            unnormalized_derivatives=un_derivs_b,
             inverse=False
         )
-        
-        # Reshape the transformed part back to (batch_size, num_transformed_dims)
-        x_b_reshaped = x_b_transformed_flat.view(-1, num_transformed_dims)
 
         # Reconstruct the output tensor
         x = torch.empty_like(z)
         x[:, self.mask == 1] = z[:, self.mask == 1] # Identity part
-        x[:, self.mask == 0] = x_b_reshaped         # Transformed part
+        x[:, self.mask == 0] = x_b_transformed         # Transformed part
         
-        # Reshape and sum the log determinant
-        log_det_b_reshaped = log_det_b_flat.view(-1, num_transformed_dims)
-        log_det_J = log_det_b_reshaped.sum(dim=1)
+        # Sum the log determinant across transformed dimensions
+        log_det_J = log_det_b.sum(dim=1)
 
         # Safety check: ensure x doesn't contain NaN or infinite values
         x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
@@ -692,32 +794,30 @@ class SplineCouplingLayer(Flow):
         
         num_transformed_dims = int((self.mask == 0).sum())
         
-        # Flatten the inputs and parameters for the spline function.
-        x_b_flat = x[:, self.mask == 0].reshape(-1)
-        un_widths_flat = unnormalized_widths[:, self.mask == 0].reshape(-1, self.num_bins)
-        un_heights_flat = unnormalized_heights[:, self.mask == 0].reshape(-1, self.num_bins)
-        un_derivs_flat = unnormalized_derivatives[:, self.mask == 0].reshape(-1, self.num_bins - 1)
+        # Extract the transformed dimensions without flattening batch
+        x_b = x[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims)
+        
+        # Extract parameters for transformed dimensions
+        un_widths_b = unnormalized_widths[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins)
+        un_heights_b = unnormalized_heights[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins)
+        un_derivs_b = unnormalized_derivatives[:, self.mask == 0]  # Shape: (batch_size, num_transformed_dims, num_bins-1)
 
         # Apply the inverse spline transformation
-        z_b_transformed_flat, log_det_inv_b_flat = self._rational_quadratic_spline(
-            inputs=x_b_flat,
-            unnormalized_widths=un_widths_flat,
-            unnormalized_heights=un_heights_flat,
-            unnormalized_derivatives=un_derivs_flat,
+        z_b_transformed, log_det_inv_b = self._rational_quadratic_spline(
+            inputs=x_b,
+            unnormalized_widths=un_widths_b,
+            unnormalized_heights=un_heights_b,
+            unnormalized_derivatives=un_derivs_b,
             inverse=True
         )
-        
-        # Reshape the transformed part back
-        z_b_reshaped = z_b_transformed_flat.view(-1, num_transformed_dims)
 
         # Reconstruct the output tensor
         z = torch.empty_like(x)
         z[:, self.mask == 1] = x[:, self.mask == 1] # Identity part
-        z[:, self.mask == 0] = z_b_reshaped          # Transformed part
+        z[:, self.mask == 0] = z_b_transformed          # Transformed part
 
-        # Reshape and sum the log determinants for each sample in the batch
-        log_det_inv_b_reshaped = log_det_inv_b_flat.view(-1, num_transformed_dims)
-        log_det_J_inv = log_det_inv_b_reshaped.sum(dim=1)
+        # Sum the log determinants across transformed dimensions
+        log_det_J_inv = log_det_inv_b.sum(dim=1)
 
         # Safety check: ensure z doesn't contain NaN or infinite values
         z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
@@ -730,6 +830,20 @@ class SplineCouplingLayer(Flow):
         return z, log_det_J_inv
 
     def _rational_quadratic_spline(self, inputs, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=False):
+        """
+        Apply rational quadratic spline transformation to batched inputs.
+        Args:
+            inputs: tensor of shape (batch_size, num_transformed_dims)
+            unnormalized_widths: tensor of shape (batch_size, num_transformed_dims, num_bins)
+            unnormalized_heights: tensor of shape (batch_size, num_transformed_dims, num_bins)
+            unnormalized_derivatives: tensor of shape (batch_size, num_transformed_dims, num_bins-1)
+            inverse: whether to apply inverse transformation
+        Returns:
+            tuple (outputs, logabsdet) where both have shape (batch_size, num_transformed_dims)
+        """
+        batch_size, num_transformed_dims = inputs.shape
+        device = inputs.device
+        
         # --- Handle points outside the defined interval ---
         inside_interval_mask = (inputs >= -self.bound) & (inputs <= self.bound)
         outside_interval_mask = ~inside_interval_mask
@@ -744,134 +858,140 @@ class SplineCouplingLayer(Flow):
         # Proceed with points inside the interval
         if not inside_interval_mask.any():
             return outputs, logabsdet
-            
-        inputs_inside = inputs[inside_interval_mask]
-        
-        # --- Normalize parameters ---
-        # Select params for inside points. These will have shape (num_inside, num_bins) etc.
-        un_widths = unnormalized_widths[inside_interval_mask, :]
-        un_heights = unnormalized_heights[inside_interval_mask, :]
-        un_derivs = unnormalized_derivatives[inside_interval_mask, :]
-        
-        # Normalize widths and heights to sum to 2*bound and enforce minimums
-        widths = F.softmax(un_widths, dim=-1)
+
+        # --- Normalize parameters for all batch elements ---
+        widths = F.softmax(unnormalized_widths, dim=-1)
         widths = self.min_bin_width + (1 - self.min_bin_width * self.num_bins) * widths
         cum_widths = torch.cumsum(widths, dim=-1)
-        cum_widths = F.pad(cum_widths, pad=(1, 0), mode='constant', value=0.0)
+        cum_widths = F.pad(cum_widths, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_widths = (2 * self.bound) * cum_widths + (-self.bound)
         cum_widths[..., 0] = -self.bound
         cum_widths[..., -1] = self.bound
         widths = cum_widths[..., 1:] - cum_widths[..., :-1]
 
-        heights = F.softmax(un_heights, dim=-1)
+        heights = F.softmax(unnormalized_heights, dim=-1)
         heights = self.min_bin_height + (1 - self.min_bin_height * self.num_bins) * heights
         cum_heights = torch.cumsum(heights, dim=-1)
-        cum_heights = F.pad(cum_heights, pad=(1, 0), mode='constant', value=0.0)
+        cum_heights = F.pad(cum_heights, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_heights = (2 * self.bound) * cum_heights + (-self.bound)
         cum_heights[..., 0] = -self.bound
         cum_heights[..., -1] = self.bound
         heights = cum_heights[..., 1:] - cum_heights[..., :-1]
 
         # Normalize derivatives and pad with 1s at boundaries
-        derivatives = self.min_derivative + F.softplus(un_derivs)
+        derivatives = self.min_derivative + F.softplus(unnormalized_derivatives)
+        # The unnormalized_derivatives is already the subset for transformed dimensions
+        # We need to pad it to get num_bins+1 elements (original had num_bins-1)
         derivatives = F.pad(derivatives, pad=(1, 1), mode='constant', value=1.0)
         
-        # --- Find bin for each input and gather params ---
+        # Debug: print shapes to understand what's happening
+        #print(f"Debug - derivatives shape after padding: {derivatives.shape}")
+        #print(f"Debug - num_bins: {self.num_bins}")
+        #print(f"Debug - unnormalized_derivatives shape: {unnormalized_derivatives.shape}")
+
+        # Only process inside-interval points
+        idx = torch.nonzero(inside_interval_mask, as_tuple=False)
+        b_idx, f_idx = idx[:, 0], idx[:, 1]
+        x_in = inputs[b_idx, f_idx]
+
         if inverse:
-            bin_idx = torch.searchsorted(cum_heights, inputs_inside[..., None]).squeeze(-1)
-        else:
-            bin_idx = torch.searchsorted(cum_widths, inputs_inside[..., None]).squeeze(-1)
-        
-        # Clamp to avoid out-of-bounds due to precision
-        bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
+            # For each (b, f), search in cum_heights[b, f]
+            bin_idx = torch.stack([
+                torch.searchsorted(cum_heights[b, f], x, right=True) - 1
+                for b, f, x in zip(b_idx, f_idx, x_in)
+            ])
+            bin_idx = bin_idx.clamp(min=0, max=self.num_bins - 1)  # Derivatives are padded, so valid range is 0 to num_bins-1
+            # Gather bin params
+            widths_sel = widths[b_idx, f_idx, bin_idx]
+            cumwidths_sel = cum_widths[b_idx, f_idx, bin_idx]
+            heights_sel = heights[b_idx, f_idx, bin_idx]
+            cumheights_sel = cum_heights[b_idx, f_idx, bin_idx]
+            derivatives_sel = derivatives[b_idx, f_idx, bin_idx]
+            # Ensure bin_idx + 1 doesn't exceed the actual derivatives tensor bounds
+            max_bin_idx = derivatives.shape[-1] - 1
+            bin_idx_plus1 = torch.clamp(bin_idx + 1, max=max_bin_idx)
+            derivatives_plus1_sel = derivatives[b_idx, f_idx, bin_idx_plus1]
+            s_k = heights_sel / widths_sel
 
-        def gather_params(params, idx):
-            return torch.gather(params, -1, idx[..., None]).squeeze(-1)
+            # Inverse: solve for xi in [0, 1] using quadratic formula
+            y = x_in
+            y_k = cumheights_sel
+            w_k = widths_sel
+            z_k = cumwidths_sel
+            d_k = derivatives_sel
+            d_k1 = derivatives_plus1_sel
+            h_k = heights_sel
+            s_k = h_k / w_k
 
-        input_cum_widths = gather_params(cum_widths, bin_idx)
-        input_widths = gather_params(widths, bin_idx)
-        input_cum_heights = gather_params(cum_heights, bin_idx)
-        input_heights = gather_params(heights, bin_idx)
-        input_delta_k = gather_params(derivatives, bin_idx)
-        input_delta_k_plus_1 = gather_params(derivatives, bin_idx + 1)
-        
-        s_k = input_heights / input_widths
-
-        # --- Apply Spline Transformation ---
-        if inverse:
-            # Solve for ξ in [0, 1] using Eq. 25-32
-            y = inputs_inside
-            y_k = input_cum_heights
-            
-            # Coefficients for the quadratic equation aξ^2 + bξ + c = 0
-            a = (input_heights * (s_k - input_delta_k)) + (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k)
-            b = (input_heights * input_delta_k) - (y - y_k) * (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * 2
+            a = (y - y_k) * (d_k + d_k1 - 2 * s_k) + h_k * (s_k - d_k)
+            b = h_k * d_k - (y - y_k) * (d_k + d_k1 - 2 * s_k)
             c = -s_k * (y - y_k)
-            
             discriminant = b.pow(2) - 4 * a * c
-            # Ensure discriminant is non-negative
             discriminant = torch.clamp(discriminant, min=0)
-
-            # The correct solution for xi in the [0, 1] range
-            # is typically obtained with the '+' in the numerator
             numerator = -b + torch.sqrt(discriminant)
             denominator = 2 * a
             eps = 1e-8
-            # Add a small epsilon to the denominator to prevent division by zero
             xi = numerator / (torch.sign(denominator) * torch.clamp(torch.abs(denominator), min=eps))
-            xi = torch.clamp(xi, 0, 1) # Ensure xi is in [0, 1]
-
-            
-            outputs_inside = xi * input_widths + input_cum_widths
-
-            # Use the xi we just solved for directly
-            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
-            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
-
-            # Add numerical stability to log determinant calculation
-            numerator_logdet = torch.clamp(numerator_logdet, min=1e-8)
-            denominator = torch.clamp(denominator, min=1e-8)
-            
-            logabsdet_inside = -torch.log(numerator_logdet) + 2 * torch.log(denominator)
-
-            # Additional safety check for NaN or infinite values
-            logabsdet_inside = torch.where(
-                torch.isnan(logabsdet_inside) | torch.isinf(logabsdet_inside),
-                torch.zeros_like(logabsdet_inside),
-                logabsdet_inside
-            )
-
-
-
-        else: # Forward pass
-            # Compute ξ = (z - z_k) / w_k
-            xi = (inputs_inside - input_cum_widths) / input_widths
             xi = torch.clamp(xi, 0, 1)
 
-            # Compute x (output) using Eq. 19
-            denominator = s_k + (input_delta_k_plus_1 + input_delta_k - 2 * s_k) * xi * (1 - xi)
-            numerator = input_heights * (s_k * xi.pow(2) + input_delta_k * xi * (1 - xi))
-            outputs_inside = input_cum_heights + (numerator / denominator)
+            z = xi * w_k + z_k
+            outputs[b_idx, f_idx] = z
 
-            # Compute log derivative using Eq. 22
-            numerator_logdet = s_k.pow(2) * (input_delta_k_plus_1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + input_delta_k * (1 - xi).pow(2))
-            
-            # Add numerical stability to log determinant calculation
-            numerator_logdet = torch.clamp(numerator_logdet, min=1e-8)
-            denominator = torch.clamp(denominator, min=1e-8)
-            
-            logabsdet_inside = torch.log(numerator_logdet) - 2 * torch.log(denominator)
-            
-            # Additional safety check for NaN or infinite values
-            logabsdet_inside = torch.where(
-                torch.isnan(logabsdet_inside) | torch.isinf(logabsdet_inside),
-                torch.zeros_like(logabsdet_inside),
-                logabsdet_inside
-            )
+            # Logabsdet
+            denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
+            numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
+            numerator_ld = torch.clamp(numerator_ld, min=1e-8)
+            denominator_ld = torch.clamp(denominator_ld, min=1e-8)
+            logabsdet_inside = -torch.log(numerator_ld) + 2 * torch.log(denominator_ld)
+            logabsdet[b_idx, f_idx] = logabsdet_inside
+        else:
+            # For each (b, f), search in cum_widths[b, f]
+            bin_idx = torch.stack([
+                torch.searchsorted(cum_widths[b, f], x, right=True) - 1
+                for b, f, x in zip(b_idx, f_idx, x_in)
+            ])
+            bin_idx = bin_idx.clamp(min=0, max=self.num_bins - 1)  # Derivatives are padded, so valid range is 0 to num_bins-1
+            # Gather bin params
+            widths_sel = widths[b_idx, f_idx, bin_idx]
+            cumwidths_sel = cum_widths[b_idx, f_idx, bin_idx]
+            heights_sel = heights[b_idx, f_idx, bin_idx]
+            cumheights_sel = cum_heights[b_idx, f_idx, bin_idx]
+            derivatives_sel = derivatives[b_idx, f_idx, bin_idx]
+            # Ensure bin_idx + 1 doesn't exceed the actual derivatives tensor bounds
+            max_bin_idx = derivatives.shape[-1] - 1
+            bin_idx_plus1 = torch.clamp(bin_idx + 1, max=max_bin_idx)
+            derivatives_plus1_sel = derivatives[b_idx, f_idx, bin_idx_plus1]
+            s_k = heights_sel / widths_sel
 
-        outputs[inside_interval_mask] = outputs_inside
-        logabsdet[inside_interval_mask] = logabsdet_inside
-        
+            # Forward: compute xi = (x - z_k) / w_k
+            x = x_in
+            z_k = cumwidths_sel
+            w_k = widths_sel
+            h_k = heights_sel
+            d_k = derivatives_sel
+            d_k1 = derivatives_plus1_sel
+            s_k = h_k / w_k
+            xi = (x - z_k) / w_k
+            xi = torch.clamp(xi, 0, 1)
+
+            # Output
+            denominator = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
+            numerator = h_k * (s_k * xi.pow(2) + d_k * xi * (1 - xi))
+            y = cumheights_sel + numerator / denominator
+            outputs[b_idx, f_idx] = y
+
+            # Logabsdet
+            numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
+            denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
+            numerator_ld = torch.clamp(numerator_ld, min=1e-8)
+            denominator_ld = torch.clamp(denominator_ld, min=1e-8)
+            logabsdet_inside = torch.log(numerator_ld) - 2 * torch.log(denominator_ld)
+            logabsdet[b_idx, f_idx] = logabsdet_inside
+
+        # Additional safety check for NaN or infinite values
+        outputs = torch.where(torch.isnan(outputs) | torch.isinf(outputs), torch.zeros_like(outputs), outputs)
+        logabsdet = torch.where(torch.isnan(logabsdet) | torch.isinf(logabsdet), torch.zeros_like(logabsdet), logabsdet)
+
         return outputs, logabsdet
     
     def _initialize_weights(self):
