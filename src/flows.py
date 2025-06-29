@@ -17,7 +17,10 @@ class MaskedLinear(nn.Linear):
 
     def forward(self, input):
         # Apply the mask to the weights during the forward pass
-        return F.linear(input, self.weight * self.mask, self.bias)
+        # Ensure mask has the same dtype as weights
+        mask = self.mask.to(dtype=self.weight.dtype)
+        return F.linear(input, self.weight * mask, self.bias)
+
 class MADE(nn.Module):
     """
     Masked Autoencoder for Distribution Estimation (Conditioner Network).
@@ -37,7 +40,12 @@ class MADE(nn.Module):
         
         # Assign hidden layer degrees deterministically to ensure proper autoregressive structure
         # Each hidden unit should have a degree between 0 and input_dim-1
-        self.m[0] = np.arange(self.hidden_dim) % (self.input_dim - 1)
+        if self.input_dim > 1:
+            self.m[0] = np.arange(self.hidden_dim) % (self.input_dim - 1)
+        else:
+            # Handle edge case when input_dim = 1
+            self.m[0] = np.zeros(self.hidden_dim, dtype=int)
+        
         self.m[1] = np.arange(self.input_dim)
 
         self.masks = self.create_masks()
@@ -52,11 +60,13 @@ class MADE(nn.Module):
         masks = []
         # Create masks as tensors and register them as buffers in the MaskedLinear layers
         
-        # Mask 1
-        m1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
+        # Mask 1: input to hidden layer
+        # Ensure each hidden unit can only see inputs with degree < its own degree
+        m1 = (self.m[-1][:, np.newaxis] < self.m[0][np.newaxis, :]).T
         masks.append(torch.from_numpy(m1.astype(np.float32)))
 
-        # Mask 2
+        # Mask 2: hidden to output layer
+        # Ensure each output unit can only see hidden units with degree < its own degree
         base_mask = (self.m[0][:, np.newaxis] < self.m[1][np.newaxis, :]).T
         m2 = np.repeat(base_mask, self.output_dim_multiplier, axis=0)
         masks.append(torch.from_numpy(m2.astype(np.float32)))
@@ -81,11 +91,12 @@ class MADE(nn.Module):
         
         
         # Conservative initialization for better stability
-        nn.init.xavier_normal_(first_layer.weight, gain=0.01)
+        nn.init.xavier_normal_(first_layer.weight, gain=0.1)  # Reduced gain for stability
         if first_layer.bias is not None:
             nn.init.zeros_(first_layer.bias)
         
-        nn.init.zeros_(final_layer.weight)
+        # Initialize final layer with small weights to start with near-identity transformation
+        nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
         if final_layer.bias is not None:
             nn.init.zeros_(final_layer.bias)
         
@@ -104,7 +115,8 @@ class MADE(nn.Module):
         # The output contains the parameters for the transformation (e.g., mu and alpha)
         output = self.net(x)
         # Clamp outputs to prevent extreme values that lead to exploding gradients
-        return torch.clamp(output, min=-10.0, max=10.0)
+        # Use tighter bounds for better stability
+        return torch.clamp(output, min=-5.0, max=5.0)
 
 class Flow(nn.Module):
     """
@@ -273,7 +285,7 @@ class MaskedAutoregressiveFlow(Flow):
         mu, alpha = params.chunk(2, dim=1)
         
         # Clamp alpha to prevent numerical instability
-        alpha = torch.clamp(alpha, min=-10, max=10)
+        alpha = torch.clamp(alpha, min=-5, max=5)
 
         # Apply the transformation with better numerical stability
         z = (x - mu) * torch.exp(-alpha)
@@ -297,8 +309,8 @@ class MaskedAutoregressiveFlow(Flow):
         x_i = z_i * exp(alpha_i) + mu_i
         """
         batch_size = z.size(0)
-        x_list = [torch.zeros(batch_size, device=z.device) for _ in range(self.dim)]
-        log_det_jacobian = torch.zeros(batch_size, device=z.device)
+        x_list = [torch.zeros(batch_size, device=z.device, dtype=z.dtype) for _ in range(self.dim)]
+        log_det_jacobian = torch.zeros(batch_size, device=z.device, dtype=z.dtype)
 
         # Iterate over each dimension to generate the sample
         for i in range(self.dim):
@@ -310,7 +322,7 @@ class MaskedAutoregressiveFlow(Flow):
             mu, alpha = params.chunk(2, dim=1)
             
             # Clamp alpha to prevent numerical instability
-            alpha = torch.clamp(alpha, min=-10, max=10)
+            alpha = torch.clamp(alpha, min=-5, max=5)
             
             # Apply the transformation for the current dimension with better stability
             exp_alpha = torch.exp(alpha[:, i])
@@ -352,7 +364,7 @@ class InverseAutoregressiveFlow(Flow):
 
     def forward(self, z):
         """
-        Computes x = f(z). This direction is fast.
+        Computes x = f(z). This direction is fast and parallel.
         x_i = z_i * exp(alpha_i) + mu_i, where mu_i and alpha_i are functions
         of z_1, ..., z_{i-1}.
         """
@@ -360,7 +372,7 @@ class InverseAutoregressiveFlow(Flow):
         mu, alpha = params.chunk(2, dim=1)
         
         # Clamp alpha to prevent numerical instability
-        alpha = torch.clamp(alpha, min=-10, max=10)
+        alpha = torch.clamp(alpha, min=-5, max=5)
         
         # The transformation is parallel
         x = z * torch.exp(alpha) + mu
@@ -384,8 +396,8 @@ class InverseAutoregressiveFlow(Flow):
         z_i = (x_i - mu_i) * exp(-alpha_i)
         """
         batch_size = x.size(0)
-        z_list = [torch.zeros(batch_size, device=x.device) for _ in range(self.dim)]
-        log_det_jacobian = torch.zeros(batch_size, device=x.device)
+        z_list = [torch.zeros(batch_size, device=x.device, dtype=x.dtype) for _ in range(self.dim)]
+        log_det_jacobian = torch.zeros(batch_size, device=x.device, dtype=x.dtype)
 
         # Iterate over each dimension
         for i in range(self.dim):
@@ -398,7 +410,7 @@ class InverseAutoregressiveFlow(Flow):
             mu, alpha = params.chunk(2, dim=1)
             
             # Clamp alpha to prevent numerical instability
-            alpha = torch.clamp(alpha, min=-10, max=10)
+            alpha = torch.clamp(alpha, min=-5, max=5)
             
             # Apply the inverse transformation for the current dimension
             z_list[i] = (x[:, i] - mu[:, i]) * torch.exp(-alpha[:, i])
