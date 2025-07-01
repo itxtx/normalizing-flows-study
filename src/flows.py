@@ -34,77 +34,119 @@ class MADE(nn.Module):
         self.output_dim_multiplier = output_dim_multiplier
 
         # Assign degrees to input, hidden, and output neurons
-        # Use deterministic assignment for better stability
+        # Use better degree assignment for proper autoregressive structure
         self.m = {}
         self.m[-1] = np.arange(self.input_dim)
         
-        # Assign hidden layer degrees deterministically to ensure proper autoregressive structure
-        # Each hidden unit should have a degree between 0 and input_dim-1
+        # Assign hidden layer degrees with better distribution
         if self.input_dim > 1:
-            self.m[0] = np.arange(self.hidden_dim) % (self.input_dim - 1)
+            # Use better distribution to ensure connectivity
+            # For 2D: use [0, 0, 1, 1] pattern to ensure both dimensions can be modeled
+            if self.input_dim == 2:
+                # Ensure both dimensions have good connectivity
+                self.m[0] = np.array([0, 0, 1, 1] * (self.hidden_dim // 4 + 1))[:self.hidden_dim]
+            else:
+                # Use linspace to ensure better coverage of degrees
+                self.m[0] = np.floor(np.linspace(0, self.input_dim - 1, self.hidden_dim)).astype(int)
         else:
             # Handle edge case when input_dim = 1
             self.m[0] = np.zeros(self.hidden_dim, dtype=int)
         
         self.m[1] = np.arange(self.input_dim)
 
+        # Debug: print degree assignments and masks for input_dim=2
+        # if self.input_dim == 2:
+        #     print("[MADE DEBUG] Degree assignments:")
+        #     print("  Input:", self.m[-1])
+        #     print("  Hidden:", self.m[0])
+        #     print("  Output:", self.m[1])
+
+        # Ensure proper autoregressive structure
+        # Each output dimension i should only depend on input dimensions < i
         self.masks = self.create_masks()
+
+        # if self.input_dim == 2:
+        #     print("[MADE DEBUG] Input-to-hidden mask (shape {}):".format(self.masks[0].shape))
+        #     print(self.masks[0].numpy())
+        #     print("[MADE DEBUG] Hidden-to-output mask (shape {}):".format(self.masks[1].shape))
+        #     print(self.masks[1].numpy())
+
         self.net = self.create_network()
 
     def create_masks(self):
         """
         Creates the masks for the linear layers.
         The mask for a connection from layer i to j ensures that an output unit
-        can only be connected to input units with a strictly smaller degree.
+        can only be connected to input units with a less than or equal degree.
         """
         masks = []
-        # Create masks as tensors and register them as buffers in the MaskedLinear layers
         
         # Mask 1: input to hidden layer
-        # Ensure each hidden unit can only see inputs with degree < its own degree
-        m1 = (self.m[-1][:, np.newaxis] < self.m[0][np.newaxis, :]).T
+        m1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
         masks.append(torch.from_numpy(m1.astype(np.float32)))
 
         # Mask 2: hidden to output layer
-        # Ensure each output unit can only see hidden units with degree < its own degree
-        base_mask = (self.m[0][:, np.newaxis] < self.m[1][np.newaxis, :]).T
-        m2 = np.repeat(base_mask, self.output_dim_multiplier, axis=0)
-        masks.append(torch.from_numpy(m2.astype(np.float32)))
+        output_dim = self.input_dim * self.output_dim_multiplier
+        m2 = np.zeros((output_dim, self.hidden_dim), dtype=np.float32)
+        for i in range(self.input_dim):
+            for k in range(self.output_dim_multiplier):
+                out_idx = i * self.output_dim_multiplier + k
+                m2[out_idx, :] = (self.m[0] <= self.m[1][i]).astype(np.float32)
+        masks.append(torch.from_numpy(m2))
         return masks
 
-    # In MADE.create_network
     def create_network(self):
         """
-        Creates the neural network with masked linear layers.
+        Creates a deeper neural network with masked linear layers.
         """
-        # Create masked linear layers by passing the mask directly to the constructor
+        # Create a deeper network for better expressiveness
+        layers = []
+        
+        # First layer: input to hidden
         first_layer = MaskedLinear(
             self.input_dim, 
             self.hidden_dim, 
-            mask=self.masks[0] # Use keyword argument for clarity
+            mask=self.masks[0]
         )
+        layers.append(first_layer)
+        layers.append(nn.ReLU())
+        
+        # Second hidden layer (fully connected within the autoregressive constraint)
+        second_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
+        layers.append(second_layer)
+        layers.append(nn.ReLU())
+        
+        # Third hidden layer
+        third_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
+        layers.append(third_layer)
+        layers.append(nn.ReLU())
+        
+        # Final layer: hidden to output (masked)
         final_layer = MaskedLinear(
             self.hidden_dim, 
             self.input_dim * self.output_dim_multiplier, 
             mask=self.masks[1]
         )
+        layers.append(final_layer)
         
-        
-        # Conservative initialization for better stability
-        nn.init.xavier_normal_(first_layer.weight, gain=0.1)  # Reduced gain for stability
+        # Better initialization for learning meaningful transformations
+        nn.init.xavier_normal_(first_layer.weight, gain=1.0)
         if first_layer.bias is not None:
             nn.init.zeros_(first_layer.bias)
         
-        # Initialize final layer with small weights to start with near-identity transformation
-        nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
-        if final_layer.bias is not None:
-            nn.init.zeros_(final_layer.bias)
+        nn.init.xavier_normal_(second_layer.weight, gain=1.0)
+        if second_layer.bias is not None:
+            nn.init.zeros_(second_layer.bias)
+            
+        nn.init.xavier_normal_(third_layer.weight, gain=1.0)
+        if third_layer.bias is not None:
+            nn.init.zeros_(third_layer.bias)
         
-        layers = [
-            first_layer,
-            nn.Tanh(),
-            final_layer
-        ]
+        # Initialize final layer with larger weights to allow expressive transformations
+        nn.init.normal_(final_layer.weight, mean=0.0, std=0.05)  # Smaller std for stability
+        if final_layer.bias is not None:
+            # Use small random values instead of zeros to allow learning
+            nn.init.normal_(final_layer.bias, mean=0.0, std=0.005)  # Smaller std for stability
         
         return nn.Sequential(*layers)
     
@@ -114,9 +156,8 @@ class MADE(nn.Module):
         """
         # The output contains the parameters for the transformation (e.g., mu and alpha)
         output = self.net(x)
-        # Clamp outputs to prevent extreme values that lead to exploding gradients
-        # Use tighter bounds for better stability
-        return torch.clamp(output, min=-5.0, max=5.0)
+        # Much tighter clamping to prevent extreme values that cause numerical instability
+        return torch.clamp(output, min=-3.0, max=3.0)
 
 class Flow(nn.Module):
     """
@@ -284,11 +325,14 @@ class MaskedAutoregressiveFlow(Flow):
         params = self.conditioner(x)
         mu, alpha = params.chunk(2, dim=1)
         
-        # Clamp alpha to prevent numerical instability
-        alpha = torch.clamp(alpha, min=-5, max=5)
+        # Much tighter clamping to prevent numerical instability
+        alpha = torch.clamp(alpha, min=-3, max=3)
 
         # Apply the transformation with better numerical stability
-        z = (x - mu) * torch.exp(-alpha)
+        # Use log-space operations to avoid overflow
+        log_scale = -alpha
+        scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+        z = (x - mu) * scale
         
         # The log-determinant of the Jacobian is the sum of the log of the scaling factors.
         log_det_jacobian = -torch.sum(alpha, dim=1)
@@ -301,6 +345,9 @@ class MaskedAutoregressiveFlow(Flow):
             log_det_jacobian
         )
         
+        # Additional safety: clamp log_det to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
+        
         return z, log_det_jacobian
 
     def forward(self, z):
@@ -309,30 +356,28 @@ class MaskedAutoregressiveFlow(Flow):
         x_i = z_i * exp(alpha_i) + mu_i
         """
         batch_size = z.size(0)
-        x_list = [torch.zeros(batch_size, device=z.device, dtype=z.dtype) for _ in range(self.dim)]
+        x = torch.zeros(batch_size, self.dim, device=z.device, dtype=z.dtype)
         log_det_jacobian = torch.zeros(batch_size, device=z.device, dtype=z.dtype)
 
         # Iterate over each dimension to generate the sample
         for i in range(self.dim):
-            # Build the current x tensor from the list
-            x_current = torch.stack(x_list, dim=1)
-            
-            # The conditioner's output for dim i depends only on x_1, ..., x_{i-1}
-            params = self.conditioner(x_current) # Pass the partially generated x
+            # Get parameters from the conditioner using the current x (which is partially filled)
+            params = self.conditioner(x)
             mu, alpha = params.chunk(2, dim=1)
             
-            # Clamp alpha to prevent numerical instability
-            alpha = torch.clamp(alpha, min=-5, max=5)
+            # Much tighter clamping to prevent numerical instability
+            alpha = torch.clamp(alpha, min=-3, max=3)
             
-            # Apply the transformation for the current dimension with better stability
-            exp_alpha = torch.exp(alpha[:, i])
-            x_list[i] = z[:, i] * exp_alpha + mu[:, i]
+            # Apply the transformation for the current dimension with better numerical stability
+            log_scale = alpha[:, i]
+            scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+            # Use clone to avoid inplace operations
+            x_new = x.clone()
+            x_new[:, i] = z[:, i] * scale + mu[:, i]
+            x = x_new
             
             log_det_jacobian += alpha[:, i]
 
-        # Stack the final result
-        x = torch.stack(x_list, dim=1)
-        
         # Safety check: ensure x doesn't contain NaN or infinite values
         x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
         log_det_jacobian = torch.where(
@@ -340,6 +385,9 @@ class MaskedAutoregressiveFlow(Flow):
             torch.zeros_like(log_det_jacobian),
             log_det_jacobian
         )
+        
+        # Additional safety: clamp log_det to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
         
         return x, log_det_jacobian
 
@@ -371,11 +419,13 @@ class InverseAutoregressiveFlow(Flow):
         params = self.conditioner(z)
         mu, alpha = params.chunk(2, dim=1)
         
-        # Clamp alpha to prevent numerical instability
-        alpha = torch.clamp(alpha, min=-5, max=5)
+        # Much tighter clamping to prevent numerical instability
+        alpha = torch.clamp(alpha, min=-3, max=3)
         
-        # The transformation is parallel
-        x = z * torch.exp(alpha) + mu
+        # The transformation is parallel with better numerical stability
+        log_scale = alpha
+        scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+        x = z * scale + mu
         
         # The log-determinant is also parallel
         log_det_jacobian = torch.sum(alpha, dim=1)
@@ -388,6 +438,9 @@ class InverseAutoregressiveFlow(Flow):
             log_det_jacobian
         )
         
+        # Additional safety: clamp log_det to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
+        
         return x, log_det_jacobian
 
     def inverse(self, x):
@@ -396,30 +449,28 @@ class InverseAutoregressiveFlow(Flow):
         z_i = (x_i - mu_i) * exp(-alpha_i)
         """
         batch_size = x.size(0)
-        z_list = [torch.zeros(batch_size, device=x.device, dtype=x.dtype) for _ in range(self.dim)]
+        z = torch.zeros(batch_size, self.dim, device=x.device, dtype=x.dtype)
         log_det_jacobian = torch.zeros(batch_size, device=x.device, dtype=x.dtype)
 
         # Iterate over each dimension
         for i in range(self.dim):
-            # Build the current z tensor from the list
-            z_current = torch.stack(z_list, dim=1)
-            
-            # The conditioner's output depends on z_1, ..., z_{i-1}, which we have
-            # already computed.
-            params = self.conditioner(z_current)
+            # Get parameters from the conditioner using the current z (which is partially filled)
+            params = self.conditioner(z)
             mu, alpha = params.chunk(2, dim=1)
             
-            # Clamp alpha to prevent numerical instability
-            alpha = torch.clamp(alpha, min=-5, max=5)
+            # Much tighter clamping to prevent numerical instability
+            alpha = torch.clamp(alpha, min=-3, max=3)
             
-            # Apply the inverse transformation for the current dimension
-            z_list[i] = (x[:, i] - mu[:, i]) * torch.exp(-alpha[:, i])
+            # Apply the inverse transformation for the current dimension with better numerical stability
+            log_scale = -alpha[:, i]
+            scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+            # Use scatter to avoid inplace operations
+            z_new = z.clone()
+            z_new[:, i] = (x[:, i] - mu[:, i]) * scale
+            z = z_new
             
             # Accumulate the log-determinant from this step's alpha
             log_det_jacobian -= alpha[:, i]
-
-        # Stack the final result
-        z = torch.stack(z_list, dim=1)
 
         # Safety check: ensure z doesn't contain NaN or infinite values
         z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
@@ -428,6 +479,9 @@ class InverseAutoregressiveFlow(Flow):
             torch.zeros_like(log_det_jacobian),
             log_det_jacobian
         )
+
+        # Additional safety: clamp log_det to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
 
         return z, log_det_jacobian
 

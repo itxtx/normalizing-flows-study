@@ -6,6 +6,15 @@ import matplotlib.pyplot as plt
 from sklearn.datasets import make_moons
 from torch.distributions import MultivariateNormal
 
+def create_mask(dim, mask_type="alternating"):
+    """Helper function to create masks for coupling layers."""
+    mask = torch.zeros(dim)
+    if mask_type == "alternating":
+        mask[::2] = 1
+    elif mask_type == "half":
+        mask[:dim//2] = 1
+    return mask
+
 def get_two_moons_data(n_samples=1000, noise=0.1):
     """
     Generate two moons dataset.
@@ -68,6 +77,58 @@ def train_with_stability(model, optimizer, data_loader, epochs, base_dist, flow_
             print(f'Epoch {epoch+1}/{epochs}, Loss: {total_loss / num_batches:.4f}')
     print("Training finished.")
 
+def diagnose_flow_model(model, data, base_dist, flow_type, device):
+    """
+    Diagnostic function to check if a flow model is working correctly.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Test 1: Check if forward pass produces reasonable outputs
+        z_test = base_dist.sample((100,))
+        x_test, log_det_fwd = model.forward(z_test)
+        
+        print(f"\n=== {flow_type} Diagnostics ===")
+        print(f"Forward pass - x range: [{x_test.min():.3f}, {x_test.max():.3f}]")
+        print(f"Forward pass - x mean: {x_test.mean(dim=0)}")
+        print(f"Forward pass - x std: {x_test.std(dim=0)}")
+        print(f"Forward pass - log_det range: [{log_det_fwd.min():.3f}, {log_det_fwd.max():.3f}]")
+        
+        # Test 2: Check if inverse pass works
+        subset_size = min(100, len(data))
+        data_subset = data[:subset_size]
+        z_inv, log_det_inv = model.inverse(data_subset)
+        
+        print(f"Inverse pass - z range: [{z_inv.min():.3f}, {z_inv.max():.3f}]")
+        print(f"Inverse pass - z mean: {z_inv.mean(dim=0)}")
+        print(f"Inverse pass - z std: {z_inv.std(dim=0)}")
+        print(f"Inverse pass - log_det range: [{log_det_inv.min():.3f}, {log_det_inv.max():.3f}]")
+        
+        # Test 3: Check round-trip consistency
+        z_roundtrip, _ = model.inverse(x_test)
+        roundtrip_error = torch.mean((z_test - z_roundtrip) ** 2).item()
+        print(f"Round-trip error (z → x → z): {roundtrip_error:.6f}")
+        
+        # Test 4: Check if the model is close to identity (untrained)
+        identity_error = torch.mean((z_test - x_test) ** 2).item()
+        print(f"Identity error (z ≈ x): {identity_error:.6f}")
+        
+        if identity_error < 0.1:
+            print("⚠️  WARNING: Model appears to be close to identity transformation (possibly untrained)")
+        
+        if roundtrip_error > 1.0:
+            print("⚠️  WARNING: High round-trip error - model may not be invertible")
+        
+        return {
+            'forward_stats': {'range': (x_test.min().item(), x_test.max().item()), 
+                            'mean': x_test.mean(dim=0).tolist(),
+                            'std': x_test.std(dim=0).tolist()},
+            'inverse_stats': {'range': (z_inv.min().item(), z_inv.max().item()),
+                            'mean': z_inv.mean(dim=0).tolist(),
+                            'std': z_inv.std(dim=0).tolist()},
+            'roundtrip_error': roundtrip_error,
+            'identity_error': identity_error
+        }
+
 def plot_enhanced_visualizations(model, data, base_dist, flow_type, device, num_samples=5000):
     """
     Enhanced visualization function for flow models.
@@ -95,10 +156,21 @@ def plot_enhanced_visualizations(model, data, base_dist, flow_type, device, num_
         axes[1].set_ylabel('x2')
         axes[1].grid(True, alpha=0.3)
         
-        # Plot 3: Latent space
-        z_data, _ = model.inverse(data)
-        axes[2].scatter(z_data[:, 0], z_data[:, 1], alpha=0.6, s=1, color='green')
-        axes[2].set_title(f'{flow_type} Latent Space')
+        # Plot 3: Latent space - handle autoregressive flows correctly
+        if 'MAF' or 'IAF' in flow_type:
+            # For autoregressive flows, use a subset of data for efficiency
+            # and show the latent space mapping
+            subset_size = min(1000, len(data))
+            data_subset = data[:subset_size]
+            z_data, _ = model.inverse(data_subset)
+            axes[2].scatter(z_data[:, 0], z_data[:, 1], alpha=0.6, s=1, color='green')
+            axes[2].set_title(f'{flow_type} Latent Space (Data → Z)')
+        else:
+            # For non-autoregressive flows, use full data
+            z_data, _ = model.inverse(data)
+            axes[2].scatter(z_data[:, 0], z_data[:, 1], alpha=0.6, s=1, color='green')
+            axes[2].set_title(f'{flow_type} Latent Space')
+        
         axes[2].set_xlabel('z1')
         axes[2].set_ylabel('z2')
         axes[2].grid(True, alpha=0.3)
