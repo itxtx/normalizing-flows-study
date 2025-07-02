@@ -1,6 +1,6 @@
 import torch
 from ..flow.flow import Flow
-from src.flows.autoregressive.made import MADE
+from .made import MADE
 
 class InverseAutoregressiveFlow(Flow):
     """
@@ -11,8 +11,21 @@ class InverseAutoregressiveFlow(Flow):
     """
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
+        self.data_dim = dim
         self.dim = dim
         self.conditioner = MADE(dim, hidden_dim, 2)
+        
+        # Initialize the conditioner to produce near-zero outputs initially
+        self._initialize_conditioner()
+
+    def _initialize_conditioner(self):
+        """Initialize the conditioner to produce near-identity transformation."""
+        # Initialize the final layer to produce small values
+        final_layer = self.conditioner.net[-1]
+        if hasattr(final_layer, 'weight'):
+            torch.nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
+        if hasattr(final_layer, 'bias'):
+            torch.nn.init.zeros_(final_layer.bias)
 
     def forward(self, z):
         """
@@ -23,22 +36,29 @@ class InverseAutoregressiveFlow(Flow):
         params = self.conditioner(z)
         mu, alpha = params.chunk(2, dim=1)
         
-        alpha = torch.clamp(alpha, min=-3, max=3)
+        # More aggressive clamping for numerical stability
+        alpha = torch.clamp(alpha, min=-2, max=2)
+        mu = torch.clamp(mu, min=-10, max=10)
         
-        log_scale = alpha
-        scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+        # Use more conservative scale clamping
+        scale = torch.exp(torch.clamp(alpha, min=-3, max=3))
+        
+        # Apply transformation with additional safety checks
         x = z * scale + mu
         
+        # Compute log determinant
         log_det_jacobian = torch.sum(alpha, dim=1)
         
-        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
+        # Comprehensive numerical stability checks
+        x = torch.where(torch.isnan(x) | torch.isinf(x), z, x)
         log_det_jacobian = torch.where(
             torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
             torch.zeros_like(log_det_jacobian),
             log_det_jacobian
         )
         
-        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
+        # Clamp log determinant to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-50, max=50)
         
         return x, log_det_jacobian
 
@@ -55,23 +75,29 @@ class InverseAutoregressiveFlow(Flow):
             params = self.conditioner(z)
             mu, alpha = params.chunk(2, dim=1)
             
-            alpha = torch.clamp(alpha, min=-3, max=3)
+            # More aggressive clamping for numerical stability
+            alpha = torch.clamp(alpha, min=-2, max=2)
+            mu = torch.clamp(mu, min=-10, max=10)
             
-            log_scale = -alpha[:, i]
-            scale = torch.exp(torch.clamp(log_scale, min=-5, max=5))
+            # Use more conservative scale clamping
+            scale = torch.exp(torch.clamp(-alpha[:, i], min=-3, max=3))
+            
+            # Apply inverse transformation with safety checks
             z_new = z.clone()
             z_new[:, i] = (x[:, i] - mu[:, i]) * scale
             z = z_new
             
             log_det_jacobian -= alpha[:, i]
 
-        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
+        # Comprehensive numerical stability checks
+        z = torch.where(torch.isnan(z) | torch.isinf(z), x, z)
         log_det_jacobian = torch.where(
             torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
             torch.zeros_like(log_det_jacobian),
             log_det_jacobian
         )
 
-        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
+        # Clamp log determinant to prevent extreme values
+        log_det_jacobian = torch.clamp(log_det_jacobian, min=-50, max=50)
 
         return z, log_det_jacobian

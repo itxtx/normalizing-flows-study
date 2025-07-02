@@ -36,6 +36,7 @@ class SplineCouplingLayer(Flow):
             data_max (float or torch.Tensor): Maximum value(s) of the data (for rescaling).
         """
         super().__init__()
+        self.data_dim = data_dim
         
         self.data_dim = data_dim
         self.num_bins = num_bins

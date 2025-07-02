@@ -1,6 +1,6 @@
 import torch
 from ..flow.flow import Flow
-from src.flows.autoregressive.made import MADE
+from .made import MADE
 
 class MaskedAutoregressiveFlow(Flow):
     """
@@ -11,6 +11,7 @@ class MaskedAutoregressiveFlow(Flow):
     """
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
+        self.data_dim = dim
         self.dim = dim
         self.conditioner = MADE(dim, hidden_dim, 2)
         

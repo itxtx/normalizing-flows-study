@@ -10,7 +10,7 @@ class ARQS(Flow):
     This implementation follows the Inverse Autoregressive Flow (IAF) structure,
     where the forward pass is fast (parallel) and the inverse is slow (sequential).
     """
-    def __init__(self, dim, hidden_dim=128, num_bins=8, layers=2, data_min=None, data_max=None):
+    def __init__(self, dim, hidden_dim=128, num_bins=8, layers=2, data_min=None, data_max=None, use_batch_norm=False):
         super().__init__()
         self.dim = dim
         self.num_bins = num_bins
@@ -21,7 +21,8 @@ class ARQS(Flow):
         self.conditioner = MADE(
             input_dim=dim,
             hidden_dim=hidden_dim,
-            output_dim_multiplier=output_dim_per_dim
+            output_dim_multiplier=output_dim_per_dim,
+            use_batch_norm=use_batch_norm
         )
 
     def _rescale_to_unit(self, x):

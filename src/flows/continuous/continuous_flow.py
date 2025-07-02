@@ -9,6 +9,7 @@ class ContinuousFlow(Flow):
     """
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
+        self.data_dim = dim
         self.dim = dim
         self.ode_func = ODEFunc(dim, hidden_dim)
 

@@ -6,6 +6,7 @@ class Flow(nn.Module):
     """
     def __init__(self):
         super().__init__()
+        self.data_dim = None
 
     def forward(self, z):
         """

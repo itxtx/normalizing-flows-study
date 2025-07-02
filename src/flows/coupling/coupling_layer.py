@@ -8,6 +8,7 @@ class CouplingLayer(Flow):
     """
     def __init__(self, data_dim, hidden_dim, mask):
         super().__init__()
+        self.data_dim = data_dim
         
         self.register_buffer('mask', mask)
 

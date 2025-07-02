@@ -48,12 +48,12 @@ def get_all_flow_classes():
     
     # Composite models
     flows.extend([
-        RealNVP(dim, n_layers=2, hidden_dim=hidden_dim),
-        RealNVPSpline(dim, n_layers=2, hidden_dim=hidden_dim),
+        RealNVP(dim, n_layers=2, hidden_dim=hidden_dim, batch_norm_between_layers=True),
+        RealNVPSpline(dim, n_layers=2, hidden_dim=hidden_dim, batch_norm_between_layers=True),
         NormalizingFlowModel([
             CouplingLayer(dim, hidden_dim, create_mask(dim, "alternating")),
             MaskedAutoregressiveFlow(dim, hidden_dim)
-        ])
+        ], batch_norm_between_layers=True)
     ])
     
     return flows

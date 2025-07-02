@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from src.flows.autoregressive.masked_linear import MaskedLinear
+from .masked_linear import MaskedLinear
 
 class MADE(nn.Module):
     """
@@ -9,12 +9,12 @@ class MADE(nn.Module):
     This network is autoregressive. For a given input x, the output for
     dimension i is only dependent on inputs x_j where j < i.
     """
-    def __init__(self, input_dim, hidden_dim, output_dim_multiplier=2):
+    def __init__(self, input_dim, hidden_dim, output_dim_multiplier=2, use_batch_norm=True):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim_multiplier = output_dim_multiplier
-
+        self.use_batch_norm = use_batch_norm
         # Assign degrees to input, hidden, and output neurons
         # Use better degree assignment for proper autoregressive structure
         self.m = {}
@@ -74,17 +74,20 @@ class MADE(nn.Module):
             mask=self.masks[0]
         )
         layers.append(first_layer)
-        layers.append(nn.BatchNorm1d(self.hidden_dim))
+        if self.use_batch_norm:
+            layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
         
         second_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
         layers.append(second_layer)
-        layers.append(nn.BatchNorm1d(self.hidden_dim))
+        if self.use_batch_norm:
+            layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
         
         third_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
         layers.append(third_layer)
-        layers.append(nn.BatchNorm1d(self.hidden_dim))
+        if self.use_batch_norm:
+            layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
         
         final_layer = MaskedLinear(
@@ -94,21 +97,23 @@ class MADE(nn.Module):
         )
         layers.append(final_layer)
         
-        nn.init.xavier_normal_(first_layer.weight, gain=1.0)
+        # Initialize with smaller weights for better stability
+        nn.init.xavier_normal_(first_layer.weight, gain=0.5)
         if first_layer.bias is not None:
             nn.init.zeros_(first_layer.bias)
         
-        nn.init.xavier_normal_(second_layer.weight, gain=1.0)
+        nn.init.xavier_normal_(second_layer.weight, gain=0.5)
         if second_layer.bias is not None:
             nn.init.zeros_(second_layer.bias)
             
-        nn.init.xavier_normal_(third_layer.weight, gain=1.0)
+        nn.init.xavier_normal_(third_layer.weight, gain=0.5)
         if third_layer.bias is not None:
             nn.init.zeros_(third_layer.bias)
         
-        nn.init.normal_(final_layer.weight, mean=0.0, std=0.05)
+        # Initialize final layer with very small weights to start near identity
+        nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
         if final_layer.bias is not None:
-            nn.init.normal_(final_layer.bias, mean=0.0, std=0.005)
+            nn.init.zeros_(final_layer.bias)
         
         return nn.Sequential(*layers)
     
@@ -117,4 +122,5 @@ class MADE(nn.Module):
         The forward pass of the conditioner network.
         """
         output = self.net(x)
-        return torch.clamp(output, min=-3.0, max=3.0)
+        # More conservative clamping to prevent extreme values
+        return torch.clamp(output, min=-2.0, max=2.0)
