@@ -412,15 +412,12 @@ class ARQS(Flow):
         self.num_bins = num_bins
         self.data_min = data_min
         self.data_max = data_max
-        # The conditioner network predicts the parameters for the splines.
-        # For an IAF, the conditioner must be autoregressive on the input `z`.
         output_dim_per_dim = 3 * self.num_bins - 1
-        self.conditioner = MLP(
+        # Use MADE as the conditioner to enforce autoregressive property
+        self.conditioner = MADE(
             input_dim=dim,
-            output_dim=dim * output_dim_per_dim,
             hidden_dim=hidden_dim,
-            num_layers=layers,  # A reasonable default
-            activation='relu'
+            output_dim_multiplier=output_dim_per_dim
         )
 
     def _rescale_to_unit(self, x):
@@ -441,31 +438,38 @@ class ARQS(Flow):
 
     def forward(self, z):
         """
-        Forward pass (sampling), z -> x. This is fast and parallel.
+        Forward pass (sampling), z -> x. This is slow and sequential (true autoregressive).
         """
         # Rescale input to [0, 1]
         z_rescaled = self._rescale_to_unit(z)
-        # Get spline parameters from the conditioner
-        params = self.conditioner(z_rescaled)
-        # Reshape parameters to be per-dimension
-        b, d = z.shape
-        output_dim_per_dim = 3 * self.num_bins - 1
-        params = params.view(b, d, output_dim_per_dim)
-        widths = params[..., :self.num_bins]
-        heights = params[..., self.num_bins:2*self.num_bins]
-        derivatives = params[..., 2*self.num_bins:]
-        # Apply the spline transformation
-        x_rescaled, log_det = rational_quadratic_spline(
-            inputs=z_rescaled,
-            widths=widths,
-            heights=heights,
-            derivatives=derivatives,
-            inverse=False
-        )
+        x_rescaled = torch.zeros_like(z_rescaled)
+        log_det_jacobian = torch.zeros(z.size(0), device=z.device)
+        # Sequentially compute each dimension of x
+        for i in range(self.dim):
+            # The conditioner's output for all dimensions depends on the input `x_rescaled`
+            params = self.conditioner(x_rescaled)
+            b, d = z.shape
+            output_dim_per_dim = 3 * self.num_bins - 1
+            params = params.view(b, d, output_dim_per_dim)
+            # Select parameters for the current dimension
+            widths_i = params[:, i, :self.num_bins]
+            heights_i = params[:, i, self.num_bins:2*self.num_bins]
+            derivatives_i = params[:, i, 2*self.num_bins:]
+            # Compute the forward transformation for the current dimension
+            x_i_rescaled, log_det_i = rational_quadratic_spline(
+                inputs=z_rescaled[:, i],
+                widths=widths_i,
+                heights=heights_i,
+                derivatives=derivatives_i,
+                inverse=False
+            )
+            # Update the input for the next iteration without in-place modification
+            x_new = x_rescaled.clone()
+            x_new[:, i] = x_i_rescaled
+            x_rescaled = x_new
+            log_det_jacobian += log_det_i
         # Rescale output back to original data range
         x = self._rescale_from_unit(x_rescaled)
-        # The total log determinant is the sum over all dimensions
-        log_det_jacobian = torch.sum(log_det, dim=1)
         return x, log_det_jacobian
 
     def inverse(self, x):
