@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .flow import Flow
+from src.flows.flow.flow import Flow
 
 class CouplingLayer(Flow):
     """
@@ -16,15 +16,19 @@ class CouplingLayer(Flow):
         # and output the parameters for the other part.
         self.s_net = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim)
         )
         self.b_net = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim)
         )

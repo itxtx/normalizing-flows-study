@@ -3,3 +3,4 @@ scikit-learn==1.4.2
 matplotlib==3.8.4
 numpy==1.26.4
 torchdiffeq==0.2.3
+benchmark-5.1.0

@@ -4,8 +4,8 @@ import torch.optim as optim
 from torch.distributions import MultivariateNormal
 import sys
 sys.path.append('../')
-from src.flows import MaskedAutoregressiveFlow
-from src.models import NormalizingFlowModel
+from src.flows.autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
+from src.models.normalizing_flow_model import NormalizingFlowModel
 
 def test_maf_stability():
     """Test if MAF produces stable outputs without NaN values."""

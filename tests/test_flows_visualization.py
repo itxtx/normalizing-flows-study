@@ -1,7 +1,8 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from src.flows import MaskedAutoregressiveFlow, InverseAutoregressiveFlow
+from src.flows.autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
+from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregressiveFlow
 
 def test_autoregressive_flows():
     """Test autoregressive flows to see if they produce reasonable outputs."""

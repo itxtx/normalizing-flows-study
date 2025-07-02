@@ -4,8 +4,8 @@ import torch.optim as optim
 from torch.distributions import MultivariateNormal
 import sys
 sys.path.append('src')
-from src.flows import InverseAutoregressiveFlow
-from src.models import NormalizingFlowModel
+from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregressiveFlow
+from src.models.normalizing_flow_model import NormalizingFlowModel
 
 def test_iaf_stability():
     """Test if IAF produces stable outputs without gradient issues."""

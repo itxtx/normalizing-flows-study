@@ -1,7 +1,8 @@
 import pytest
 import torch
 import numpy as np
-from src.flows import MaskedAutoregressiveFlow, InverseAutoregressiveFlow
+from src.flows.autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
+from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregressiveFlow
 
 # Try to import ARQS if available
 try:

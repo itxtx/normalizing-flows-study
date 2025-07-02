@@ -157,7 +157,7 @@ raw_data/
 processed_data/
 
 # Model checkpoints and outputs
-models/
+
 checkpoints/
 outputs/
 results/

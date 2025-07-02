@@ -16,14 +16,15 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
-from src.flows import (
-    CouplingLayer,
-    MaskedAutoregressiveFlow, 
-    InverseAutoregressiveFlow,
-    SplineCouplingLayer,
-    ContinuousFlow
-)
-from src.models import RealNVP, RealNVPSpline, NormalizingFlowModel
+from src.flows.coupling.coupling_layer import CouplingLayer
+from src.flows.spline.spline_coupling_layer import SplineCouplingLayer
+from src.flows.autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
+from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregressiveFlow
+from src.flows.continuous.continuous_flow import ContinuousFlow
+from src.models.real_nvp import RealNVP
+from src.models.real_nvp_spline import RealNVPSpline
+from src.models.normalizing_flow_model import NormalizingFlowModel
+
 
 # Global configuration
 REPORTS_DIR = Path("reports/stability")
