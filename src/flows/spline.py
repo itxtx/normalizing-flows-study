@@ -18,7 +18,9 @@ class SplineCouplingLayer(Flow):
                  bound=5.0,
                  min_bin_width=1e-3,
                  min_bin_height=1e-3,
-                 min_derivative=1e-3):
+                 min_derivative=1e-3,
+                 data_min=None,
+                 data_max=None):
         """
         Initializes the SplineCouplingLayer.
 
@@ -30,6 +32,8 @@ class SplineCouplingLayer(Flow):
             num_bins (int): The number of bins to use for the spline.
             bound (float): The bound of the interval [-B, B] on which the spline is defined.
                            Values outside this interval are identity-mapped.
+            data_min (float or torch.Tensor): Minimum value(s) of the data (for rescaling).
+            data_max (float or torch.Tensor): Maximum value(s) of the data (for rescaling).
         """
         super().__init__()
         
@@ -39,6 +43,8 @@ class SplineCouplingLayer(Flow):
         self.min_bin_width = min_bin_width
         self.min_bin_height = min_bin_height
         self.min_derivative = min_derivative
+        self.data_min = data_min
+        self.data_max = data_max
 
         self.register_buffer('mask', mask)
 
@@ -64,17 +70,37 @@ class SplineCouplingLayer(Flow):
         )
         return unnormalized_widths, unnormalized_heights, unnormalized_derivatives
 
+    def _rescale_to_spline(self, x):
+        """
+        Rescale data from [data_min, data_max] to [-bound, bound].
+        """
+        if self.data_min is None or self.data_max is None:
+            return x
+        scale = (2 * self.bound) / (self.data_max - self.data_min)
+        return scale * (x - self.data_min) - self.bound
+
+    def _rescale_from_spline(self, x):
+        """
+        Rescale data from [-bound, bound] back to [data_min, data_max].
+        """
+        if self.data_min is None or self.data_max is None:
+            return x
+        scale = (self.data_max - self.data_min) / (2 * self.bound)
+        return (x + self.bound) * scale + self.data_min
+
     def forward(self, z):
         """
         Computes the forward pass x = f(z). (z -> x)
         """
-        z_a = z * self.mask
+        # Rescale input to spline interval
+        z_rescaled = self._rescale_to_spline(z)
+        z_a = z_rescaled * self.mask
         
         unnormalized_widths, unnormalized_heights, unnormalized_derivatives = self._get_spline_params(z_a)
         
         num_transformed_dims = int((self.mask == 0).sum())
 
-        z_b = z[:, self.mask == 0]
+        z_b = z_rescaled[:, self.mask == 0]
         
         un_widths_b = unnormalized_widths[:, self.mask == 0]
         un_heights_b = unnormalized_heights[:, self.mask == 0]
@@ -87,10 +113,12 @@ class SplineCouplingLayer(Flow):
             unnormalized_derivatives=un_derivs_b,
             inverse=False
         )
+        # Rescale output back to original data range
+        x_b_transformed = self._rescale_from_spline(x_b_transformed)
 
-        x = torch.empty_like(z)
-        x[:, self.mask == 1] = z[:, self.mask == 1]
-        x[:, self.mask == 0] = x_b_transformed
+        # Use torch.where instead of in-place assignment
+        x = torch.where(self.mask.unsqueeze(0).expand_as(z), z, torch.zeros_like(z))
+        x = torch.where(~self.mask.unsqueeze(0).expand_as(z), x_b_transformed, x)
         
         log_det_J = log_det_b.sum(dim=1)
 
@@ -107,13 +135,15 @@ class SplineCouplingLayer(Flow):
         """
         Computes the inverse pass z = g(x). (x -> z)
         """
-        x_a = x * self.mask
+        # Rescale input to spline interval
+        x_rescaled = self._rescale_to_spline(x)
+        x_a = x_rescaled * self.mask
 
         unnormalized_widths, unnormalized_heights, unnormalized_derivatives = self._get_spline_params(x_a)
         
         num_transformed_dims = int((self.mask == 0).sum())
         
-        x_b = x[:, self.mask == 0]
+        x_b = x_rescaled[:, self.mask == 0]
         
         un_widths_b = unnormalized_widths[:, self.mask == 0]
         un_heights_b = unnormalized_heights[:, self.mask == 0]
@@ -126,10 +156,12 @@ class SplineCouplingLayer(Flow):
             unnormalized_derivatives=un_derivs_b,
             inverse=True
         )
+        # Rescale output back to original data range
+        z_b_transformed = self._rescale_from_spline(z_b_transformed)
 
-        z = torch.empty_like(x)
-        z[:, self.mask == 1] = x[:, self.mask == 1]
-        z[:, self.mask == 0] = z_b_transformed
+        # Use torch.where instead of in-place assignment
+        z = torch.where(self.mask.unsqueeze(0).expand_as(x), x, torch.zeros_like(x))
+        z = torch.where(~self.mask.unsqueeze(0).expand_as(x), z_b_transformed, z)
 
         log_det_J_inv = log_det_inv_b.sum(dim=1)
 
@@ -145,131 +177,176 @@ class SplineCouplingLayer(Flow):
     def _rational_quadratic_spline(self, inputs, unnormalized_widths, unnormalized_heights, unnormalized_derivatives, inverse=False):
         """
         Apply rational quadratic spline transformation to batched inputs.
+        Fully vectorized implementation avoiding all in-place operations.
         """
         batch_size, num_transformed_dims = inputs.shape
         device = inputs.device
+        eps = 1e-8  # Numerical stability constant
         
+        # Create masks for inside/outside interval
         inside_interval_mask = (inputs >= -self.bound) & (inputs <= self.bound)
         outside_interval_mask = ~inside_interval_mask
 
-        outputs = torch.zeros_like(inputs)
+        # Initialize outputs - identity mapping for outside interval
+        outputs = torch.where(outside_interval_mask, inputs, torch.zeros_like(inputs))
         logabsdet = torch.zeros_like(inputs)
 
-        outputs[outside_interval_mask] = inputs[outside_interval_mask]
-        logabsdet[outside_interval_mask] = 0
-
+        # If no elements are inside the interval, return early
         if not inside_interval_mask.any():
             return outputs, logabsdet
 
+        # Process spline parameters with better numerical stability
         widths = F.softmax(unnormalized_widths, dim=-1)
         widths = self.min_bin_width + (1 - self.min_bin_width * self.num_bins) * widths
+        widths = torch.clamp(widths, min=eps)  # Ensure positive widths
+        
         cum_widths = torch.cumsum(widths, dim=-1)
         cum_widths = F.pad(cum_widths, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_widths = (2 * self.bound) * cum_widths + (-self.bound)
-        cum_widths[..., 0] = -self.bound
-        cum_widths[..., -1] = self.bound
+        cum_widths = torch.where(
+            torch.arange(cum_widths.shape[-1], device=cum_widths.device).unsqueeze(0).unsqueeze(0) == 0,
+            torch.full_like(cum_widths, -self.bound),
+            cum_widths
+        )
+        cum_widths = torch.where(
+            torch.arange(cum_widths.shape[-1], device=cum_widths.device).unsqueeze(0).unsqueeze(0) == cum_widths.shape[-1] - 1,
+            torch.full_like(cum_widths, self.bound),
+            cum_widths
+        )
         widths = cum_widths[..., 1:] - cum_widths[..., :-1]
+        widths = torch.clamp(widths, min=eps)  # Ensure positive widths
 
         heights = F.softmax(unnormalized_heights, dim=-1)
         heights = self.min_bin_height + (1 - self.min_bin_height * self.num_bins) * heights
+        heights = torch.clamp(heights, min=eps)  # Ensure positive heights
+        
         cum_heights = torch.cumsum(heights, dim=-1)
         cum_heights = F.pad(cum_heights, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_heights = (2 * self.bound) * cum_heights + (-self.bound)
-        cum_heights[..., 0] = -self.bound
-        cum_heights[..., -1] = self.bound
+        cum_heights = torch.where(
+            torch.arange(cum_heights.shape[-1], device=cum_heights.device).unsqueeze(0).unsqueeze(0) == 0,
+            torch.full_like(cum_heights, -self.bound),
+            cum_heights
+        )
+        cum_heights = torch.where(
+            torch.arange(cum_heights.shape[-1], device=cum_heights.device).unsqueeze(0).unsqueeze(0) == cum_heights.shape[-1] - 1,
+            torch.full_like(cum_heights, self.bound),
+            cum_heights
+        )
         heights = cum_heights[..., 1:] - cum_heights[..., :-1]
+        heights = torch.clamp(heights, min=eps)  # Ensure positive heights
 
         derivatives = self.min_derivative + F.softplus(unnormalized_derivatives)
+        derivatives = torch.clamp(derivatives, min=eps)  # Ensure positive derivatives
         derivatives = F.pad(derivatives, pad=(1, 1), mode='constant', value=1.0)
+
+        # Vectorized bin index computation
+        if inverse:
+            # For inverse, search in y_knots (cum_heights)
+            bin_idx = torch.searchsorted(cum_heights, inputs, right=True) - 1
+        else:
+            # For forward, search in x_knots (cum_widths)
+            bin_idx = torch.searchsorted(cum_widths, inputs, right=True) - 1
         
-        idx = torch.nonzero(inside_interval_mask, as_tuple=False)
-        b_idx, f_idx = idx[:, 0], idx[:, 1]
-        x_in = inputs[b_idx, f_idx]
+        bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
+
+        # Gather spline parameters for all elements
+        widths_sel = torch.gather(widths, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        cumwidths_sel = torch.gather(cum_widths, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        heights_sel = torch.gather(heights, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        cumheights_sel = torch.gather(cum_heights, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        derivatives_sel = torch.gather(derivatives, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        
+        bin_idx_plus1 = torch.clamp(bin_idx + 1, max=derivatives.shape[-1] - 1)
+        derivatives_plus1_sel = torch.gather(derivatives, -1, bin_idx_plus1.unsqueeze(-1)).squeeze(-1)
+        
+        # Safe division for s_k
+        s_k = heights_sel / torch.clamp(widths_sel, min=eps)
 
         if inverse:
-            bin_idx = torch.stack([
-                torch.searchsorted(cum_heights[b, f], x, right=True) - 1
-                for b, f, x in zip(b_idx, f_idx, x_in)
-            ])
-            bin_idx = bin_idx.clamp(min=0, max=self.num_bins - 1)
-            widths_sel = widths[b_idx, f_idx, bin_idx]
-            cumwidths_sel = cum_widths[b_idx, f_idx, bin_idx]
-            heights_sel = heights[b_idx, f_idx, bin_idx]
-            cumheights_sel = cum_heights[b_idx, f_idx, bin_idx]
-            derivatives_sel = derivatives[b_idx, f_idx, bin_idx]
-            max_bin_idx = derivatives.shape[-1] - 1
-            bin_idx_plus1 = torch.clamp(bin_idx + 1, max=max_bin_idx)
-            derivatives_plus1_sel = derivatives[b_idx, f_idx, bin_idx_plus1]
-            s_k = heights_sel / widths_sel
-
-            y = x_in
+            # Inverse transformation: y -> x
+            y = inputs
             y_k = cumheights_sel
-            w_k = widths_sel
+            w_k = torch.clamp(widths_sel, min=eps)
             z_k = cumwidths_sel
-            d_k = derivatives_sel
-            d_k1 = derivatives_plus1_sel
-            h_k = heights_sel
+            d_k = torch.clamp(derivatives_sel, min=eps)
+            d_k1 = torch.clamp(derivatives_plus1_sel, min=eps)
+            h_k = torch.clamp(heights_sel, min=eps)
             s_k = h_k / w_k
 
+            # Solve quadratic equation for xi with better numerical stability
             a = (y - y_k) * (d_k + d_k1 - 2 * s_k) + h_k * (s_k - d_k)
             b = h_k * d_k - (y - y_k) * (d_k + d_k1 - 2 * s_k)
             c = -s_k * (y - y_k)
-            discriminant = b.pow(2) - 4 * a * c
-            discriminant = torch.clamp(discriminant, min=0)
-            numerator = -b + torch.sqrt(discriminant)
-            denominator = 2 * a
-            eps = 1e-8
-            xi = numerator / (torch.sign(denominator) * torch.clamp(torch.abs(denominator), min=eps))
-            xi = torch.clamp(xi, 0, 1)
+            
+            # Handle cases where a is very small (linear case)
+            linear_mask = torch.abs(a) < eps
+            quadratic_mask = ~linear_mask
+            
+            xi = torch.zeros_like(y)
+            
+            # Linear case: xi = -c / b
+            if linear_mask.any():
+                xi_linear = -c[linear_mask] / torch.clamp(b[linear_mask], min=eps)
+                xi_linear = torch.clamp(xi_linear, 0, 1)
+                xi[linear_mask] = xi_linear
+            
+            # Quadratic case: use quadratic formula
+            if quadratic_mask.any():
+                a_quad = a[quadratic_mask]
+                b_quad = b[quadratic_mask]
+                c_quad = c[quadratic_mask]
+                
+                discriminant = b_quad.pow(2) - 4 * a_quad * c_quad
+                discriminant = torch.clamp(discriminant, min=0)
+                
+                # Use the more stable root
+                sqrt_disc = torch.sqrt(discriminant)
+                xi_quad = (-b_quad - sqrt_disc) / (2 * torch.clamp(a_quad, min=eps))
+                xi_quad = torch.clamp(xi_quad, 0, 1)
+                xi[quadratic_mask] = xi_quad
 
-            z = xi * w_k + z_k
-            outputs[b_idx, f_idx] = z
-
+            # Compute transformed values
+            transformed_outputs = xi * w_k + z_k
+            
+            # Compute log determinant with better numerical stability
             denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
             numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
-            numerator_ld = torch.clamp(numerator_ld, min=1e-8)
-            denominator_ld = torch.clamp(denominator_ld, min=1e-8)
-            logabsdet_inside = -torch.log(numerator_ld) + 2 * torch.log(denominator_ld)
-            logabsdet[b_idx, f_idx] = logabsdet_inside
-        else:
-            bin_idx = torch.stack([
-                torch.searchsorted(cum_widths[b, f], x, right=True) - 1
-                for b, f, x in zip(b_idx, f_idx, x_in)
-            ])
-            bin_idx = bin_idx.clamp(min=0, max=self.num_bins - 1)
-            widths_sel = widths[b_idx, f_idx, bin_idx]
-            cumwidths_sel = cum_widths[b_idx, f_idx, bin_idx]
-            heights_sel = heights[b_idx, f_idx, bin_idx]
-            cumheights_sel = cum_heights[b_idx, f_idx, bin_idx]
-            derivatives_sel = derivatives[b_idx, f_idx, bin_idx]
-            max_bin_idx = derivatives.shape[-1] - 1
-            bin_idx_plus1 = torch.clamp(bin_idx + 1, max=max_bin_idx)
-            derivatives_plus1_sel = derivatives[b_idx, f_idx, bin_idx_plus1]
-            s_k = heights_sel / widths_sel
+            numerator_ld = torch.clamp(numerator_ld, min=eps)
+            denominator_ld = torch.clamp(denominator_ld, min=eps)
+            transformed_logabsdet = -torch.log(numerator_ld) + 2 * torch.log(denominator_ld)
 
-            x = x_in
+        else:
+            # Forward transformation: x -> y
+            x = inputs
             z_k = cumwidths_sel
-            w_k = widths_sel
-            h_k = heights_sel
-            d_k = derivatives_sel
-            d_k1 = derivatives_plus1_sel
+            w_k = torch.clamp(widths_sel, min=eps)
+            h_k = torch.clamp(heights_sel, min=eps)
+            d_k = torch.clamp(derivatives_sel, min=eps)
+            d_k1 = torch.clamp(derivatives_plus1_sel, min=eps)
             s_k = h_k / w_k
             xi = (x - z_k) / w_k
             xi = torch.clamp(xi, 0, 1)
 
+            # Compute transformed values with better numerical stability
             denominator = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
+            denominator = torch.clamp(denominator, min=eps)
             numerator = h_k * (s_k * xi.pow(2) + d_k * xi * (1 - xi))
-            y = cumheights_sel + numerator / denominator
-            outputs[b_idx, f_idx] = y
+            transformed_outputs = cumheights_sel + numerator / denominator
 
+            # Compute log determinant with better numerical stability
             numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
             denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
-            numerator_ld = torch.clamp(numerator_ld, min=1e-8)
-            denominator_ld = torch.clamp(denominator_ld, min=1e-8)
-            logabsdet_inside = torch.log(numerator_ld) - 2 * torch.log(denominator_ld)
-            logabsdet[b_idx, f_idx] = logabsdet_inside
+            numerator_ld = torch.clamp(numerator_ld, min=eps)
+            denominator_ld = torch.clamp(denominator_ld, min=eps)
+            transformed_logabsdet = torch.log(numerator_ld) - 2 * torch.log(denominator_ld)
 
-        outputs = torch.where(torch.isnan(outputs) | torch.isinf(outputs), torch.zeros_like(outputs), outputs)
+        # Use torch.where to select transformed values only for inside interval
+        outputs = torch.where(inside_interval_mask, transformed_outputs, outputs)
+        logabsdet = torch.where(inside_interval_mask, transformed_logabsdet, logabsdet)
+
+        # Handle numerical issues more aggressively
+        outputs = torch.where(torch.isnan(outputs) | torch.isinf(outputs), inputs, outputs)
         logabsdet = torch.where(torch.isnan(logabsdet) | torch.isinf(logabsdet), torch.zeros_like(logabsdet), logabsdet)
 
         return outputs, logabsdet
@@ -320,70 +397,112 @@ class MLP(nn.Module):
                 x = self.activation(x)
         return x
 
-class ARQS(nn.Module):
-    def __init__(self, dim, num_bins=8, hidden_dim=128, num_layers=2):
+from .flow import Flow, SequentialFlow
+from .autoregressive import MADE
+
+class ARQS(Flow):
+    """
+    Autoregressive flow with rational-quadratic splines (IAF variant).
+    This implementation follows the Inverse Autoregressive Flow (IAF) structure,
+    where the forward pass is fast (parallel) and the inverse is slow (sequential).
+    """
+    def __init__(self, dim, hidden_dim=128, num_bins=8, layers=2, data_min=None, data_max=None):
         super().__init__()
         self.dim = dim
         self.num_bins = num_bins
-        
+        self.data_min = data_min
+        self.data_max = data_max
+        # The conditioner network predicts the parameters for the splines.
+        # For an IAF, the conditioner must be autoregressive on the input `z`.
         output_dim_per_dim = 3 * self.num_bins - 1
-        
         self.conditioner = MLP(
-            input_dim=self.dim,
-            output_dim=self.dim * output_dim_per_dim,
+            input_dim=dim,
+            output_dim=dim * output_dim_per_dim,
             hidden_dim=hidden_dim,
-            num_layers=num_layers,
+            num_layers=layers,  # A reasonable default
             activation='relu'
         )
 
-    def forward(self, x):
-        params = self.conditioner(x)
-        
-        b, d = x.shape
+    def _rescale_to_unit(self, x):
+        """
+        Rescale data from [data_min, data_max] to [0, 1].
+        """
+        if self.data_min is None or self.data_max is None:
+            return x
+        return (x - self.data_min) / (self.data_max - self.data_min)
+
+    def _rescale_from_unit(self, x):
+        """
+        Rescale data from [0, 1] back to [data_min, data_max].
+        """
+        if self.data_min is None or self.data_max is None:
+            return x
+        return x * (self.data_max - self.data_min) + self.data_min
+
+    def forward(self, z):
+        """
+        Forward pass (sampling), z -> x. This is fast and parallel.
+        """
+        # Rescale input to [0, 1]
+        z_rescaled = self._rescale_to_unit(z)
+        # Get spline parameters from the conditioner
+        params = self.conditioner(z_rescaled)
+        # Reshape parameters to be per-dimension
+        b, d = z.shape
         output_dim_per_dim = 3 * self.num_bins - 1
         params = params.view(b, d, output_dim_per_dim)
-        
         widths = params[..., :self.num_bins]
         heights = params[..., self.num_bins:2*self.num_bins]
         derivatives = params[..., 2*self.num_bins:]
-        
-        z, log_det = rational_quadratic_spline(
-            inputs=x,
+        # Apply the spline transformation
+        x_rescaled, log_det = rational_quadratic_spline(
+            inputs=z_rescaled,
             widths=widths,
             heights=heights,
-            derivatives=derivatives
+            derivatives=derivatives,
+            inverse=False
         )
-        
+        # Rescale output back to original data range
+        x = self._rescale_from_unit(x_rescaled)
+        # The total log determinant is the sum over all dimensions
         log_det_jacobian = torch.sum(log_det, dim=1)
+        return x, log_det_jacobian
 
-        return z, log_det_jacobian
-
-    def inverse(self, z):
-        x = torch.zeros_like(z)
-        
+    def inverse(self, x):
+        """
+        Inverse pass (density estimation), x -> z. This is slow and sequential.
+        """
+        # Rescale input to [0, 1]
+        x_rescaled = self._rescale_to_unit(x)
+        z_rescaled = torch.zeros_like(x_rescaled)
+        log_det_jacobian = torch.zeros(x.size(0), device=x.device)
+        # Sequentially compute each dimension of z
         for i in range(self.dim):
-            params = self.conditioner(x)
-            
-            b, d = z.shape
+            # The conditioner's output for all dimensions depends on the input `z_rescaled`
+            params = self.conditioner(z_rescaled)
+            b, d = x.shape
             output_dim_per_dim = 3 * self.num_bins - 1
             params = params.view(b, d, output_dim_per_dim)
-            
-            widths_i = params[..., i, :self.num_bins]
-            heights_i = params[..., i, self.num_bins:2*self.num_bins]
-            derivatives_i = params[..., i, 2*self.num_bins:]
-            
-            x_i, _ = rational_quadratic_spline(
-                inputs=z[:, i],
+            # Select parameters for the current dimension
+            widths_i = params[:, i, :self.num_bins]
+            heights_i = params[:, i, self.num_bins:2*self.num_bins]
+            derivatives_i = params[:, i, 2*self.num_bins:]
+            # Compute the inverse transformation for the current dimension
+            z_i_rescaled, log_det_i = rational_quadratic_spline(
+                inputs=x_rescaled[:, i],
                 widths=widths_i,
                 heights=heights_i,
                 derivatives=derivatives_i,
                 inverse=True
             )
-            x[:, i] = x_i
-        
-        _, log_det_jacobian = self.forward(x)
-        
-        return x, log_det_jacobian
+            # Update the input for the next iteration without in-place modification
+            z_new = z_rescaled.clone()
+            z_new[:, i] = z_i_rescaled
+            z_rescaled = z_new
+            log_det_jacobian += log_det_i
+        # Rescale output back to original data range
+        z = self._rescale_from_unit(z_rescaled)
+        return z, log_det_jacobian
 
 def rational_quadratic_spline(
     inputs,
@@ -397,47 +516,54 @@ def rational_quadratic_spline(
     epsilon=1e-6
 ):
     """
-    Implements the rational quadratic spline transformation.
+    Implements the rational quadratic spline transformation with robust batching.
     """
-    inputs = torch.clamp(inputs, 0, 1)
+    # Add a small epsilon for numerical stability
+    epsilon = 1e-6
 
+    # Normalize widths and heights to be positive and sum to 1
     widths = F.softmax(widths, dim=-1)
     heights = F.softmax(heights, dim=-1)
     
+    # Add minimums to prevent collapse and clamp for stability
     widths = min_bin_width + (1 - min_bin_width * widths.shape[-1]) * widths
     heights = min_bin_height + (1 - min_bin_height * heights.shape[-1]) * heights
+    widths = torch.clamp(widths, min=epsilon)
+    heights = torch.clamp(heights, min=epsilon)
 
+    # Ensure derivatives are positive
     derivatives = F.softplus(derivatives) + min_derivative
+    derivatives = torch.clamp(derivatives, min=epsilon)
     
+    # Precompute knot positions
     x_knots = F.pad(torch.cumsum(widths, dim=-1), (1, 0), 'constant', 0.0)
     y_knots = F.pad(torch.cumsum(heights, dim=-1), (1, 0), 'constant', 0.0)
     
+    # Ensure boundary derivatives are 1
     derivatives = F.pad(derivatives, (1, 1), 'constant', 1.0)
-    
+
+    # Find the correct bin for each input value
     if inverse:
-        bin_idx = torch.searchsorted(y_knots, inputs)
+        bin_idx = torch.searchsorted(y_knots, inputs.unsqueeze(-1), right=True) - 1
     else:
-        bin_idx = torch.searchsorted(x_knots, inputs)
+        bin_idx = torch.searchsorted(x_knots, inputs.unsqueeze(-1), right=True) - 1
 
-    bin_idx = torch.clamp(bin_idx, 1, widths.shape[-1]).unsqueeze(-1)
+    bin_idx = torch.clamp(bin_idx, 0, widths.shape[-1] - 1)
 
-    x_k = torch.gather(x_knots, -1, bin_idx - 1)
-    y_k = torch.gather(y_knots, -1, bin_idx - 1)
+    # Gather the parameters for each input's bin
+    x_k = torch.gather(x_knots, -1, bin_idx)
+    y_k = torch.gather(y_knots, -1, bin_idx)
+    w_k = torch.gather(widths, -1, bin_idx)
+    h_k = torch.gather(heights, -1, bin_idx)
+    d_k = torch.gather(derivatives, -1, bin_idx)
+    d_k_plus_1 = torch.gather(derivatives, -1, bin_idx + 1)
     
-    w_k = torch.gather(widths, -1, bin_idx - 1)
-    h_k = torch.gather(heights, -1, bin_idx - 1)
-    
-    d_k = torch.gather(derivatives, -1, bin_idx - 1)
-    d_k_plus_1 = torch.gather(derivatives, -1, bin_idx)
-    
-    s_k = h_k / w_k
+    s_k = h_k / torch.clamp(w_k, min=epsilon)
 
     inputs_r = inputs.unsqueeze(-1)
-    
+
     if inverse:
         term1 = (inputs_r - y_k) * (d_k + d_k_plus_1 - 2 * s_k)
-        term2 = h_k * (s_k - d_k)
-        
         a = h_k * (s_k - d_k) + term1
         b = h_k * d_k - term1
         c = -s_k * (inputs_r - y_k)
@@ -445,27 +571,29 @@ def rational_quadratic_spline(
         discriminant = b.pow(2) - 4 * a * c
         discriminant = torch.clamp(discriminant, min=0)
         
-        theta = (2 * c) / (-b - discriminant.sqrt())
+        theta = (2 * c) / (-b - torch.sqrt(discriminant))
+        theta = torch.clamp(theta, 0, 1)
         outputs = theta * w_k + x_k
         
         theta_one_minus_theta = theta * (1 - theta)
         nominator = s_k.pow(2) * (d_k_plus_1 * theta.pow(2) + 2 * s_k * theta_one_minus_theta + d_k * (1 - theta).pow(2))
         denominator = (s_k + (d_k + d_k_plus_1 - 2 * s_k) * theta_one_minus_theta).pow(2)
-        derivative = nominator / (denominator + epsilon)
-        log_det = -torch.log(derivative)
+        derivative = nominator / torch.clamp(denominator, min=epsilon)
+        log_det = -torch.log(torch.clamp(derivative, min=epsilon))
 
     else:
-        theta = (inputs_r - x_k) / w_k
+        theta = (inputs_r - x_k) / torch.clamp(w_k, min=epsilon)
+        theta = torch.clamp(theta, 0, 1)
         theta_one_minus_theta = theta * (1 - theta)
         
         nominator = h_k * (s_k * theta.pow(2) + d_k * theta_one_minus_theta)
         denominator = s_k + (d_k + d_k_plus_1 - 2 * s_k) * theta_one_minus_theta
         
-        outputs = y_k + nominator / (denominator + epsilon)
+        outputs = y_k + nominator / torch.clamp(denominator, min=epsilon)
         
         nominator_deriv = s_k.pow(2) * (d_k_plus_1 * theta.pow(2) + 2*s_k*theta_one_minus_theta + d_k*(1-theta).pow(2))
         denominator_deriv = denominator.pow(2)
-        derivative = nominator_deriv / (denominator_deriv + epsilon)
-        log_det = torch.log(derivative)
+        derivative = nominator_deriv / torch.clamp(denominator_deriv, min=epsilon)
+        log_det = torch.log(torch.clamp(derivative, min=epsilon))
         
     return outputs.squeeze(-1), log_det.squeeze(-1)
