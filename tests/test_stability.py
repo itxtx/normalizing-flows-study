@@ -534,11 +534,11 @@ class TestPerformanceBenchmarking:
         reporter = StabilityReporter()
         report_data = {
             'forward_benchmark': {
-                'mean_time': benchmark.stats.mean,
-                'std_time': benchmark.stats.stddev,
-                'min_time': benchmark.stats.min,
-                'max_time': benchmark.stats.max,
-                'iterations': benchmark.stats.rounds
+                'mean_time': benchmark.stats['mean'],
+                'std_time': benchmark.stats['stddev'],
+                'min_time': benchmark.stats['min'],
+                'max_time': benchmark.stats['max'],
+                'iterations': benchmark.stats['rounds']
             }
         }
         reporter.save_report(flow_name, report_data)
@@ -559,11 +559,11 @@ class TestPerformanceBenchmarking:
         reporter = StabilityReporter()
         report_data = {
             'inverse_benchmark': {
-                'mean_time': benchmark.stats.mean,
-                'std_time': benchmark.stats.stddev,
-                'min_time': benchmark.stats.min,
-                'max_time': benchmark.stats.max,
-                'iterations': benchmark.stats.rounds
+                'mean_time': benchmark.stats['mean'],
+                'std_time': benchmark.stats['stddev'],
+                'min_time': benchmark.stats['min'],
+                'max_time': benchmark.stats['max'],
+                'iterations': benchmark.stats['rounds']
             }
         }
         reporter.save_report(flow_name, report_data)

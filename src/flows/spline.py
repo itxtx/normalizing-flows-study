@@ -116,9 +116,9 @@ class SplineCouplingLayer(Flow):
         # Rescale output back to original data range
         x_b_transformed = self._rescale_from_spline(x_b_transformed)
 
-        # Use torch.where instead of in-place assignment
-        x = torch.where(self.mask.unsqueeze(0).expand_as(z), z, torch.zeros_like(z))
-        x = torch.where(~self.mask.unsqueeze(0).expand_as(z), x_b_transformed, x)
+        # Assign transformed values to the correct positions using advanced indexing
+        x = z.clone()
+        x[:, self.mask == 0] = x_b_transformed
         
         log_det_J = log_det_b.sum(dim=1)
 
@@ -159,9 +159,9 @@ class SplineCouplingLayer(Flow):
         # Rescale output back to original data range
         z_b_transformed = self._rescale_from_spline(z_b_transformed)
 
-        # Use torch.where instead of in-place assignment
-        z = torch.where(self.mask.unsqueeze(0).expand_as(x), x, torch.zeros_like(x))
-        z = torch.where(~self.mask.unsqueeze(0).expand_as(x), z_b_transformed, z)
+        # Assign transformed values to the correct positions using advanced indexing
+        z = x.clone()
+        z[:, self.mask == 0] = z_b_transformed
 
         log_det_J_inv = log_det_inv_b.sum(dim=1)
 
@@ -182,7 +182,7 @@ class SplineCouplingLayer(Flow):
         batch_size, num_transformed_dims = inputs.shape
         device = inputs.device
         eps = 1e-8  # Numerical stability constant
-        
+
         # Create masks for inside/outside interval
         inside_interval_mask = (inputs >= -self.bound) & (inputs <= self.bound)
         outside_interval_mask = ~inside_interval_mask
@@ -199,40 +199,24 @@ class SplineCouplingLayer(Flow):
         widths = F.softmax(unnormalized_widths, dim=-1)
         widths = self.min_bin_width + (1 - self.min_bin_width * self.num_bins) * widths
         widths = torch.clamp(widths, min=eps)  # Ensure positive widths
-        
+
         cum_widths = torch.cumsum(widths, dim=-1)
         cum_widths = F.pad(cum_widths, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_widths = (2 * self.bound) * cum_widths + (-self.bound)
-        cum_widths = torch.where(
-            torch.arange(cum_widths.shape[-1], device=cum_widths.device).unsqueeze(0).unsqueeze(0) == 0,
-            torch.full_like(cum_widths, -self.bound),
-            cum_widths
-        )
-        cum_widths = torch.where(
-            torch.arange(cum_widths.shape[-1], device=cum_widths.device).unsqueeze(0).unsqueeze(0) == cum_widths.shape[-1] - 1,
-            torch.full_like(cum_widths, self.bound),
-            cum_widths
-        )
+        cum_widths[..., 0] = -self.bound
+        cum_widths[..., -1] = self.bound
         widths = cum_widths[..., 1:] - cum_widths[..., :-1]
         widths = torch.clamp(widths, min=eps)  # Ensure positive widths
 
         heights = F.softmax(unnormalized_heights, dim=-1)
         heights = self.min_bin_height + (1 - self.min_bin_height * self.num_bins) * heights
         heights = torch.clamp(heights, min=eps)  # Ensure positive heights
-        
+
         cum_heights = torch.cumsum(heights, dim=-1)
         cum_heights = F.pad(cum_heights, pad=(0, 0, 1, 0), mode='constant', value=0.0)
         cum_heights = (2 * self.bound) * cum_heights + (-self.bound)
-        cum_heights = torch.where(
-            torch.arange(cum_heights.shape[-1], device=cum_heights.device).unsqueeze(0).unsqueeze(0) == 0,
-            torch.full_like(cum_heights, -self.bound),
-            cum_heights
-        )
-        cum_heights = torch.where(
-            torch.arange(cum_heights.shape[-1], device=cum_heights.device).unsqueeze(0).unsqueeze(0) == cum_heights.shape[-1] - 1,
-            torch.full_like(cum_heights, self.bound),
-            cum_heights
-        )
+        cum_heights[..., 0] = -self.bound
+        cum_heights[..., -1] = self.bound
         heights = cum_heights[..., 1:] - cum_heights[..., :-1]
         heights = torch.clamp(heights, min=eps)  # Ensure positive heights
 
@@ -240,110 +224,86 @@ class SplineCouplingLayer(Flow):
         derivatives = torch.clamp(derivatives, min=eps)  # Ensure positive derivatives
         derivatives = F.pad(derivatives, pad=(1, 1), mode='constant', value=1.0)
 
-        # Vectorized bin index computation
+        # Vectorized searchsorted for [batch, dim] pairs
+        flat_inputs = inputs.contiguous().view(-1)  # [B * D]
         if inverse:
-            # For inverse, search in y_knots (cum_heights)
-            bin_idx = torch.searchsorted(cum_heights, inputs, right=True) - 1
+            boundaries = cum_heights.contiguous().view(-1, cum_heights.shape[-1])  # [B * D, num_bins+1]
         else:
-            # For forward, search in x_knots (cum_widths)
-            bin_idx = torch.searchsorted(cum_widths, inputs, right=True) - 1
-        
+            boundaries = cum_widths.contiguous().view(-1, cum_widths.shape[-1])  # [B * D, num_bins+1]
+        # Row-wise searchsorted for each [B*D] pair
+        bin_idx = torch.stack([
+            torch.searchsorted(boundaries[i], flat_inputs[i], right=True) - 1
+            for i in range(flat_inputs.shape[0])
+        ])
         bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
 
-        # Gather spline parameters for all elements
-        widths_sel = torch.gather(widths, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
-        cumwidths_sel = torch.gather(cum_widths, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
-        heights_sel = torch.gather(heights, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
-        cumheights_sel = torch.gather(cum_heights, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
-        derivatives_sel = torch.gather(derivatives, -1, bin_idx.unsqueeze(-1)).squeeze(-1)
-        
-        bin_idx_plus1 = torch.clamp(bin_idx + 1, max=derivatives.shape[-1] - 1)
-        derivatives_plus1_sel = torch.gather(derivatives, -1, bin_idx_plus1.unsqueeze(-1)).squeeze(-1)
-        
-        # Safe division for s_k
-        s_k = heights_sel / torch.clamp(widths_sel, min=eps)
+        # Gather all parameters for each [batch, dim] pair
+        widths_flat = widths.contiguous().view(-1, widths.shape[-1])
+        cumwidths_flat = cum_widths.contiguous().view(-1, cum_widths.shape[-1])
+        heights_flat = heights.contiguous().view(-1, heights.shape[-1])
+        cumheights_flat = cum_heights.contiguous().view(-1, cum_heights.shape[-1])
+        derivatives_flat = derivatives.contiguous().view(-1, derivatives.shape[-1])
 
+        # Gather for each input
+        w_k = torch.gather(widths_flat, 1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        z_k = torch.gather(cumwidths_flat, 1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        h_k = torch.gather(heights_flat, 1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        y_k = torch.gather(cumheights_flat, 1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        d_k = torch.gather(derivatives_flat, 1, bin_idx.unsqueeze(-1)).squeeze(-1)
+        d_k1 = torch.gather(derivatives_flat, 1, (bin_idx + 1).clamp(max=derivatives_flat.shape[1]-1).unsqueeze(-1)).squeeze(-1)
+        s_k = h_k / torch.clamp(w_k, min=eps)
+
+        xi = None
         if inverse:
-            # Inverse transformation: y -> x
-            y = inputs
-            y_k = cumheights_sel
-            w_k = torch.clamp(widths_sel, min=eps)
-            z_k = cumwidths_sel
-            d_k = torch.clamp(derivatives_sel, min=eps)
-            d_k1 = torch.clamp(derivatives_plus1_sel, min=eps)
-            h_k = torch.clamp(heights_sel, min=eps)
-            s_k = h_k / w_k
-
-            # Solve quadratic equation for xi with better numerical stability
+            y = flat_inputs
+            # Solve quadratic equation for xi
             a = (y - y_k) * (d_k + d_k1 - 2 * s_k) + h_k * (s_k - d_k)
             b = h_k * d_k - (y - y_k) * (d_k + d_k1 - 2 * s_k)
             c = -s_k * (y - y_k)
-            
-            # Handle cases where a is very small (linear case)
             linear_mask = torch.abs(a) < eps
             quadratic_mask = ~linear_mask
-            
             xi = torch.zeros_like(y)
-            
-            # Linear case: xi = -c / b
+            # Linear case
             if linear_mask.any():
-                xi_linear = -c[linear_mask] / torch.clamp(b[linear_mask], min=eps)
-                xi_linear = torch.clamp(xi_linear, 0, 1)
-                xi[linear_mask] = xi_linear
-            
-            # Quadratic case: use quadratic formula
+                xi[linear_mask] = -c[linear_mask] / torch.clamp(b[linear_mask], min=eps)
+            # Quadratic case
             if quadratic_mask.any():
                 a_quad = a[quadratic_mask]
                 b_quad = b[quadratic_mask]
                 c_quad = c[quadratic_mask]
-                
                 discriminant = b_quad.pow(2) - 4 * a_quad * c_quad
                 discriminant = torch.clamp(discriminant, min=0)
-                
-                # Use the more stable root
                 sqrt_disc = torch.sqrt(discriminant)
-                xi_quad = (-b_quad - sqrt_disc) / (2 * torch.clamp(a_quad, min=eps))
-                xi_quad = torch.clamp(xi_quad, 0, 1)
-                xi[quadratic_mask] = xi_quad
-
-            # Compute transformed values
+                xi[quadratic_mask] = (-b_quad - sqrt_disc) / (2 * torch.clamp(a_quad, min=eps))
+            xi = torch.clamp(xi, 0, 1)
             transformed_outputs = xi * w_k + z_k
-            
-            # Compute log determinant with better numerical stability
             denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
             numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
             numerator_ld = torch.clamp(numerator_ld, min=eps)
             denominator_ld = torch.clamp(denominator_ld, min=eps)
             transformed_logabsdet = -torch.log(numerator_ld) + 2 * torch.log(denominator_ld)
-
         else:
-            # Forward transformation: x -> y
-            x = inputs
-            z_k = cumwidths_sel
-            w_k = torch.clamp(widths_sel, min=eps)
-            h_k = torch.clamp(heights_sel, min=eps)
-            d_k = torch.clamp(derivatives_sel, min=eps)
-            d_k1 = torch.clamp(derivatives_plus1_sel, min=eps)
-            s_k = h_k / w_k
-            xi = (x - z_k) / w_k
+            x = flat_inputs
+            xi = (x - z_k) / torch.clamp(w_k, min=eps)
             xi = torch.clamp(xi, 0, 1)
-
-            # Compute transformed values with better numerical stability
             denominator = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
             denominator = torch.clamp(denominator, min=eps)
             numerator = h_k * (s_k * xi.pow(2) + d_k * xi * (1 - xi))
-            transformed_outputs = cumheights_sel + numerator / denominator
+            transformed_outputs = y_k + numerator / denominator
+            numerator_deriv = s_k.pow(2) * (d_k1 * xi.pow(2) + 2*s_k*xi*(1-xi) + d_k*(1-xi).pow(2))
+            denominator_deriv = denominator.pow(2)
+            derivative = numerator_deriv / torch.clamp(denominator_deriv, min=eps)
+            transformed_logabsdet = torch.log(torch.clamp(derivative, min=eps))
 
-            # Compute log determinant with better numerical stability
-            numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))
-            denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
-            numerator_ld = torch.clamp(numerator_ld, min=eps)
-            denominator_ld = torch.clamp(denominator_ld, min=eps)
-            transformed_logabsdet = torch.log(numerator_ld) - 2 * torch.log(denominator_ld)
-
-        # Use torch.where to select transformed values only for inside interval
-        outputs = torch.where(inside_interval_mask, transformed_outputs, outputs)
-        logabsdet = torch.where(inside_interval_mask, transformed_logabsdet, logabsdet)
+        # Reshape back to [batch_size, num_transformed_dims]
+        outputs_flat = transformed_outputs
+        logabsdet_flat = transformed_logabsdet
+        outputs = outputs.clone().view(-1)
+        logabsdet = logabsdet.clone().view(-1)
+        outputs[inside_interval_mask.view(-1)] = outputs_flat[inside_interval_mask.view(-1)]
+        logabsdet[inside_interval_mask.view(-1)] = logabsdet_flat[inside_interval_mask.view(-1)]
+        outputs = outputs.view(batch_size, num_transformed_dims)
+        logabsdet = logabsdet.view(batch_size, num_transformed_dims)
 
         # Handle numerical issues more aggressively
         outputs = torch.where(torch.isnan(outputs) | torch.isinf(outputs), inputs, outputs)
@@ -548,10 +508,18 @@ def rational_quadratic_spline(
 
     # Find the correct bin for each input value
     if inverse:
-        bin_idx = torch.searchsorted(y_knots, inputs.unsqueeze(-1), right=True) - 1
+        # For inverse, search in y_knots (cum_heights)
+        boundaries = y_knots.contiguous()
+        if boundaries.dim() > 2:
+            boundaries = boundaries.view(-1, boundaries.shape[-1])
+        bin_idx = torch.searchsorted(boundaries, inputs.unsqueeze(-1), right=True) - 1
     else:
-        bin_idx = torch.searchsorted(x_knots, inputs.unsqueeze(-1), right=True) - 1
-
+        # For forward, search in x_knots (cum_widths)
+        boundaries = x_knots.contiguous()
+        if boundaries.dim() > 2:
+            boundaries = boundaries.view(-1, boundaries.shape[-1])
+        bin_idx = torch.searchsorted(boundaries, inputs.unsqueeze(-1), right=True) - 1
+    
     bin_idx = torch.clamp(bin_idx, 0, widths.shape[-1] - 1)
 
     # Gather the parameters for each input's bin
