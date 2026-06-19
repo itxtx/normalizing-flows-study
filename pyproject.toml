@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "normalizing-flows-study"
+version = "0.1.0"
+description = "A study implementation of normalizing flows in PyTorch: coupling, autoregressive, spline, continuous (CNF), and residual flows, with visualization and diagnostic tooling."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "itxtx" }]
+keywords = ["normalizing-flows", "deep-learning", "pytorch", "generative-models", "density-estimation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch==2.3.0",
+    "numpy==1.26.4",
+    "scikit-learn==1.4.2",
+    "matplotlib==3.8.4",
+    "torchdiffeq==0.2.3",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+viz = ["plotly>=5.20"]
+dev = ["pytest>=8.0", "pytest-benchmark>=4.0"]
+
+[project.urls]
+Repository = "https://github.com/itxtx/normalizing-flows-study"
+
+# Keep the existing `src/` layout. After `pip install -e .` the package is
+# importable as `import src` / `from src.flows import ...`, matching the codebase.
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
