@@ -7,6 +7,7 @@ Run figure scripts from the repo root after `pip install -e .`.
 
 import os
 import time
+import textwrap
 
 import numpy as np
 import torch
@@ -68,6 +69,32 @@ def style_axes(ax, grid_axis="both"):
     if grid_axis:
         ax.grid(axis=grid_axis, color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
+
+
+# --------------------------------------------------------------------------- #
+# Figure layout helpers (centered titles, wrapped captions, clean save)
+#
+# Create figures with layout="constrained" so the title and caption get proper
+# spacing automatically, then save WITHOUT bbox_inches="tight" so the figure
+# stays centered at its intended size (tight-bbox + manually placed text is what
+# pushes plots off-center and lets long captions overflow the edges).
+# --------------------------------------------------------------------------- #
+def titled(fig, title, subtitle=None, size=14):
+    """Centered, bold figure title with an optional second (subtitle) line."""
+    head = title if not subtitle else f"{title}\n{textwrap.fill(subtitle, 80)}"
+    fig.suptitle(head, fontsize=size, fontweight="bold")
+
+
+def caption(fig, text, width=115):
+    """Wrapped, centered footer caption that never runs off the figure."""
+    fig.supxlabel(textwrap.fill(text, width), fontsize=9, color=INK)
+
+
+def finish(fig, path):
+    """Save centered at the figure's own size (no tight-bbox cropping)."""
+    fig.savefig(path, facecolor="white")
+    plt.close(fig)
+    print("wrote", path)
 
 
 # --------------------------------------------------------------------------- #

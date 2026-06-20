@@ -15,7 +15,8 @@ LIM = 3.0
 
 def main():
     nrow = len(DATASETS)
-    fig, axes = plt.subplots(nrow, 3, figsize=(8.6, 2.75 * nrow))
+    fig, axes = plt.subplots(nrow, 3, figsize=(8.6, 2.75 * nrow),
+                             layout="constrained")
 
     for r, ds in enumerate(DATASETS):
         model = C.load_cache(ds, "realnvp")["model"]
