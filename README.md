@@ -174,29 +174,6 @@ python plots/fig_cnf.py                           # continuous-flow trajectories
 python plots/fig_benchmark.py                     # params vs sampling throughput
 ```
 
-## Numerical correctness
-
-Building the figures surfaced several real numerical bugs. All of the core ones
-are now **fixed** (with regression tests in `tests/correctness/test_bugfix_regression.py`):
-
-- **Spline coupling** — corrected the inverse quadratic root (citardauq form),
-  fixed a boundary-padding axis bug, dropped BatchNorm from the conditioner, and
-  vectorized the bin search. Now bit-exact invertible with calibrated densities.
-- **MAF / IAF** — the MADE conditioner wasn't actually autoregressive (interleaved
-  output order, non-strict mask, unmasked intermediate layers) and used BatchNorm.
-  Fixed all of it; train- and eval-mode likelihoods now match and densities are
-  calibrated.
-- **Continuous flow (CNF)** — `ODEFunc` hard-coded the log-det dynamics to zero;
-  it now computes the true divergence (exact trace in low dim, Hutchinson's
-  estimator otherwise) and the field is time-conditioned, so MLE training works.
-- **BatchNorm-between-layers** — made it a properly invertible flow layer (running
-  stats used consistently in both directions).
-
-The original root-cause analysis and remediation plan is in
-[`docs/bugfix-plan.md`](docs/bugfix-plan.md).
-
-**Still open:** the Neural Autoregressive Flow's separate `DeepMADE` has the same
-autoregressive-masking bug that was fixed in the shared `MADE` — a good next fix.
 
 ## References
 
