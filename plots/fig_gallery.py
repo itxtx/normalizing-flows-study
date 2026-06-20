@@ -28,32 +28,60 @@ def main():
         # column 1 -- learned density (exact, via change of variables)
         ax1 = axes[r][1]
         xx, yy, dens = C.log_density_grid(model, lim=LIM, res=220)
-        ax1.pcolormesh(xx, yy, dens, cmap=C.DENSITY_CMAP, vmin=0,
-                       vmax=np.percentile(dens, 99.5), shading="auto", rasterized=True)
+        ax1.pcolormesh(
+            xx,
+            yy,
+            dens,
+            cmap=C.DENSITY_CMAP,
+            vmin=0,
+            vmax=np.percentile(dens, 99.5),
+            shading="auto",
+            rasterized=True,
+        )
 
         # column 2 -- samples from the flow (z ~ N(0, I) -> x)
         ax2 = axes[r][2]
         xs = C.model_samples(model, 30000).numpy()
-        ax2.hist2d(xs[:, 0], xs[:, 1], bins=140, range=[[-LIM, LIM], [-LIM, LIM]],
-                   cmap=C.DENSITY_CMAP)
+        ax2.hist2d(
+            xs[:, 0],
+            xs[:, 1],
+            bins=140,
+            range=[[-LIM, LIM], [-LIM, LIM]],
+            cmap=C.DENSITY_CMAP,
+        )
 
         for ax in (axes[r][0], ax1, ax2):
-            ax.set_xlim(-LIM, LIM); ax.set_ylim(-LIM, LIM)
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_xlim(-LIM, LIM)
+            ax.set_ylim(-LIM, LIM)
+            ax.set_xticks([])
+            ax.set_yticks([])
         axes[r][0].set_ylabel(C.DATASETS[ds][0], fontsize=12.5, color=C.INK)
 
     axes[0][0].set_title("Target data", fontsize=12.5, color=C.INK)
-    axes[0][1].set_title("Learned density", fontsize=12.5, color=C.AGENT, fontweight="bold")
-    axes[0][2].set_title("Samples from the flow", fontsize=12.5, color=C.AGENT, fontweight="bold")
+    axes[0][1].set_title(
+        "Learned density", fontsize=12.5, color=C.AGENT, fontweight="bold"
+    )
+    axes[0][2].set_title(
+        "Samples from the flow", fontsize=12.5, color=C.AGENT, fontweight="bold"
+    )
 
-    fig.suptitle("Real NVP learns to model — and generate — four 2D distributions",
-                 fontsize=15, fontweight="bold", x=0.012, ha="left", y=0.997)
-    fig.text(0.012, 0.011,
-             "Left: target samples (gray).  Middle: the flow's exact learned "
-             "density via change of variables.  Right: new samples drawn from "
-             "the trained flow.  One model class, trained by maximum likelihood "
-             "on each distribution.",
-             fontsize=9.5, color=C.INK)
+    fig.suptitle(
+        "Real NVP learns to model — and generate — four 2D distributions",
+        fontsize=15,
+        fontweight="bold",
+        x=0.012,
+        ha="left",
+        y=0.997,
+    )
+    fig.text(
+        0.012,
+        0.011,
+        "Left: target samples (gray).  Middle: the flow's exact learned "
+        "density via change of variables.  Right: new samples drawn from "
+        "the trained flow.",
+        fontsize=9.5,
+        color=C.INK,
+    )
     fig.tight_layout(rect=(0.0, 0.03, 1, 0.965))
     out = f"{C.ASSETS}/gallery_density.png"
     fig.savefig(out, facecolor="white", bbox_inches="tight")

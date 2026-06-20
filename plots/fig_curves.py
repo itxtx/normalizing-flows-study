@@ -13,8 +13,12 @@ import matplotlib.pyplot as plt
 import _common as C
 
 DATASETS = ["moons", "circles", "checkerboard", "spirals"]
-DS_COLOR = {"moons": "#2563EB", "circles": "#059669",
-            "checkerboard": "#D97706", "spirals": "#7C3AED"}
+DS_COLOR = {
+    "moons": "#2563EB",
+    "circles": "#059669",
+    "checkerboard": "#D97706",
+    "spirals": "#7C3AED",
+}
 D = 2
 BPD = 1.0 / (D * np.log(2))
 
@@ -31,14 +35,19 @@ def main():
     for ds in DATASETS:
         curve = C.load_cache(ds, "realnvp")["curve"]
         ys = smooth(curve, 9)
-        ax.plot(np.arange(len(ys)), ys, color=DS_COLOR[ds], linewidth=2.2,
-                label=C.DATASETS[ds][0])
+        ax.plot(
+            np.arange(len(ys)),
+            ys,
+            color=DS_COLOR[ds],
+            linewidth=2.2,
+            label=C.DATASETS[ds][0],
+        )
         finals.append((C.DATASETS[ds][0], float(np.mean(curve[-20:]))))
 
     ax.set_xlabel("Training epoch")
     ax.set_ylabel("Negative log-likelihood  (nats, lower = better)")
     ax.set_xlim(0, 900)
-    ax.set_ylim(1.3, 3.0)   # clip an early transient spike on checkerboard
+    ax.set_ylim(1.3, 3.0)  # clip an early transient spike on checkerboard
     C.style_axes(ax, grid_axis="both")
     ax.legend(loc="upper right", frameon=False, title="Target distribution")
 
@@ -48,10 +57,12 @@ def main():
     ax2.set_ylabel("bits / dim")
     ax2.spines["top"].set_visible(False)
 
-    ax.set_title("Real NVP converges on every distribution\n"
-                 "Negative log-likelihood falls from ~2.8 to 1.5-2.0 nats within "
-                 "a few hundred epochs",
-                 fontsize=14, fontweight="bold", loc="left")
+    ax.set_title(
+        "Real NVP converges on every distribution\n",
+        fontsize=14,
+        fontweight="bold",
+        loc="left",
+    )
     sub = "    ".join(f"{n}: {v:.2f}" for n, v in finals)
     fig.text(0.012, 0.012, "Final NLL  ->   " + sub, fontsize=9, color=C.INK)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
