@@ -51,8 +51,8 @@ This repo implements the major flow families behind that idea, each as a small, 
 </p>
 
 <p align="center">
-  <img src="assets/benchmark.png" width="50%" alt="Log-log scatter of parameter count versus sampling throughput for Real NVP, Spline, MAF, IAF, and CNF.">
-  <img src="assets/training_curves.png" width="50%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
+  <img src="assets/benchmark.png" width="45%" alt="Log-log scatter of parameter count versus sampling throughput for Real NVP, Spline, MAF, IAF, and CNF.">
+  <img src="assets/training_curves.png" width="45%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
 </p>
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).
