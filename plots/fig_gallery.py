@@ -66,28 +66,14 @@ def main():
         "Samples from the flow", fontsize=12.5, color=C.AGENT, fontweight="bold"
     )
 
-    fig.suptitle(
-        "Real NVP learns to model — and generate — four 2D distributions",
-        fontsize=15,
-        fontweight="bold",
-        x=0.012,
-        ha="left",
-        y=0.997,
-    )
-    fig.text(
-        0.012,
-        0.011,
+    C.titled(fig, "Real NVP learns to model — and generate — four 2D distributions")
+    C.caption(
+        fig,
         "Left: target samples (gray).  Middle: the flow's exact learned "
         "density via change of variables.  Right: new samples drawn from "
         "the trained flow.",
-        fontsize=9.5,
-        color=C.INK,
     )
-    fig.tight_layout(rect=(0.0, 0.03, 1, 0.965))
-    out = f"{C.ASSETS}/gallery_density.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.finish(fig, f"{C.ASSETS}/gallery_density.png")
 
 
 if __name__ == "__main__":

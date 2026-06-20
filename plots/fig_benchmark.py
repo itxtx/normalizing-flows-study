@@ -18,7 +18,7 @@ def main():
         b = C.load_cache("moons", fl)
         rows.append((C.FLOW_LABEL[fl], b["params"], b["sps"]))
 
-    fig, ax = plt.subplots(figsize=(9.2, 5.6))
+    fig, ax = plt.subplots(figsize=(9.2, 5.6), layout="constrained")
     for name, params, sps in rows:
         ax.scatter(
             params,
@@ -47,28 +47,19 @@ def main():
     ax.set_ylim(4e3, 2e6)
     C.style_axes(ax, grid_axis="both")
 
-    ax.set_title(
-        "Flow families: parameters vs sampling speed\n"
-        "Autoregressive flows sample fastest at these sizes;\n"
-        "the continuous flow is smallest but slowest (ODE solves)",
-        fontsize=14,
-        fontweight="bold",
-        loc="left",
+    C.titled(
+        fig,
+        "Flow families: parameters vs sampling speed",
+        "Autoregressive flows sample fastest at these sizes; the continuous flow "
+        "is smallest but slowest (ODE solves)",
     )
-    fig.text(
-        0.012,
-        0.012,
+    C.caption(
+        fig,
         "2D models on CPU, measured over batches of 4,000 samples.  "
-        "IAF samples in one pass; MAF's fast direction is density "
-        "evaluation;\n the CNF integrates an ODE per sample.",
-        fontsize=9,
-        color=C.INK,
+        "IAF samples in one pass; MAF's fast direction is density evaluation; "
+        "the CNF integrates an ODE per sample.",
     )
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
-    out = f"{C.ASSETS}/benchmark.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.finish(fig, f"{C.ASSETS}/benchmark.png")
 
 
 if __name__ == "__main__":

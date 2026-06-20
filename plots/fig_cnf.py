@@ -56,7 +56,7 @@ def main():
 
     snaps = [0, steps // 3, 2 * steps // 3, steps]
     titles = ["t = 0  (Gaussian)", "t = 0.33", "t = 0.67", "t = 1  (data)"]
-    fig, axes = plt.subplots(1, 4, figsize=(13.0, 3.5))
+    fig, axes = plt.subplots(1, 4, figsize=(13.0, 3.7), layout="constrained")
     for ax, s, ttl in zip(axes, snaps, titles):
         ax.quiver(GX, GY, U, Vv, color="#CBD5E1", angles="xy",
                   scale_units="xy", scale=4.0, width=0.004)
@@ -74,18 +74,14 @@ def main():
         axes[-1].plot(traj[:, i, 0], traj[:, i, 1], color=C.ACCENT,
                       lw=0.6, alpha=0.5)
 
-    fig.suptitle("Continuous flow: a point cloud transported along a learned velocity field",
-                 fontsize=15, fontweight="bold", x=0.012, ha="left", y=1.02)
-    fig.text(0.012, -0.02,
-             "The ODEFunc network defines dz/dt = v(z) (gray arrows). Integrating "
-             "the Gaussian base (black) forward in time carries it onto the "
-             "two-moons target (blue); red curves trace individual trajectories.",
-             fontsize=9.5, color=C.INK)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
-    out = f"{C.ASSETS}/cnf_trajectories.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.titled(fig, "Continuous flow: a point cloud transported along a learned velocity field")
+    C.caption(
+        fig,
+        "The ODEFunc network defines dz/dt = v(z) (gray arrows). Integrating "
+        "the Gaussian base (black) forward in time carries it onto the "
+        "two-moons target (blue); red curves trace individual trajectories.",
+    )
+    C.finish(fig, f"{C.ASSETS}/cnf_trajectories.png")
 
 
 if __name__ == "__main__":

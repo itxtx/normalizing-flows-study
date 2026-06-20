@@ -34,7 +34,7 @@ def main():
         x, _ = model.forward(torch.from_numpy(arr.astype(np.float32)))
         return x.numpy()
 
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(10.2, 5.2))
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(10.2, 5.2), layout="constrained")
 
     # ---- latent space ----
     for ln in h_lines:
@@ -101,28 +101,14 @@ def main():
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
 
-    fig.suptitle(
-        "A normalizing flow is a learned, invertible warp of space",
-        fontsize=15,
-        fontweight="bold",
-        x=0.012,
-        ha="left",
-        y=0.99,
-    )
-    fig.text(
-        0.012,
-        0.012,
+    C.titled(fig, "A normalizing flow is a learned, invertible warp of space")
+    C.caption(
+        fig,
         "The flow bends the regular Gaussian grid (left) into the data "
         "manifold (right). A straight line in latent space (red) becomes a "
         "smooth path along the data distribution.",
-        fontsize=9.5,
-        color=C.INK,
     )
-    fig.tight_layout(rect=(0, 0.035, 1, 0.95))
-    out = f"{C.ASSETS}/latent_interpolation.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.finish(fig, f"{C.ASSETS}/latent_interpolation.png")
 
 
 if __name__ == "__main__":

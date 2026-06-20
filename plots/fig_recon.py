@@ -22,7 +22,7 @@ EPS32 = np.finfo(np.float32).eps  # ~1.19e-7
 
 @torch.no_grad()
 def main():
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(10.4, 5.0))
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(10.4, 5.0), layout="constrained")
 
     # ---- left: round-trip overlay (moons) ----
     m = C.load_cache("moons", "realnvp")["model"]
@@ -87,27 +87,13 @@ def main():
     axR.legend(loc="upper left", frameon=False, fontsize=8.5)
     C.style_axes(axR, grid_axis="y")
 
-    fig.suptitle(
-        "Real NVP is invertible by construction",
-        fontsize=15,
-        fontweight="bold",
-        x=0.012,
-        ha="left",
-        y=0.99,
-    )
-    fig.text(
-        0.012,
-        0.012,
+    C.titled(fig, "Real NVP is invertible by construction")
+    C.caption(
+        fig,
         "Coupling layers have an analytic inverse, so encoding then decoding "
         "returns the input to ~1e-7 (float32 limit) on every distribution.",
-        fontsize=9.5,
-        color=C.INK,
     )
-    fig.tight_layout(rect=(0, 0.035, 1, 0.95))
-    out = f"{C.ASSETS}/reconstruction_error.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.finish(fig, f"{C.ASSETS}/reconstruction_error.png")
 
 
 if __name__ == "__main__":

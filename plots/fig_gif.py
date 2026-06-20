@@ -29,7 +29,7 @@ N_SAMPLES = int(os.environ.get("GIF_SAMPLES", 20000))
 N_LAYERS = int(os.environ.get("GIF_LAYERS", 8))
 HIDDEN_DIM = int(os.environ.get("GIF_HIDDEN", 256))
 LR = float(os.environ.get("GIF_LR", 1e-3))
-N_EPOCHS = int(os.environ.get("GIF_EPOCHS", 250))
+N_EPOCHS = int(os.environ.get("GIF_EPOCHS", 1000))
 BATCH_SIZE = int(os.environ.get("GIF_BATCH", 1024))
 
 LIM = 3.0

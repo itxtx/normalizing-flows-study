@@ -29,7 +29,7 @@ def smooth(y, k=9):
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(9.0, 5.4))
+    fig, ax = plt.subplots(figsize=(9.0, 5.4), layout="constrained")
 
     finals = []
     for ds in DATASETS:
@@ -57,19 +57,14 @@ def main():
     ax2.set_ylabel("bits / dim")
     ax2.spines["top"].set_visible(False)
 
-    ax.set_title(
-        "Real NVP converges on every distribution\n",
-        fontsize=14,
-        fontweight="bold",
-        loc="left",
+    C.titled(
+        fig,
+        "Real NVP converges on every distribution",
+        "Negative log-likelihood falls from ~2.8 to 1.5–2.0 nats within a few hundred epochs",
     )
     sub = "    ".join(f"{n}: {v:.2f}" for n, v in finals)
-    fig.text(0.012, 0.012, "Final NLL  ->   " + sub, fontsize=9, color=C.INK)
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
-    out = f"{C.ASSETS}/training_curves.png"
-    fig.savefig(out, facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    C.caption(fig, "Final NLL  →   " + sub)
+    C.finish(fig, f"{C.ASSETS}/training_curves.png")
 
 
 if __name__ == "__main__":
