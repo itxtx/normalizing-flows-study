@@ -1,10 +1,9 @@
-# Normalizing Flows — A Study Implementation
+# Normalizing Flows
 
 A from-scratch, PyTorch implementation of normalizing flows for density estimation and generative modeling, spanning coupling, autoregressive, spline, continuous (CNF), and residual flow families — with a visualization toolkit, diagnostics, and tutorial notebooks.
 
 [![CI](https://github.com/itxtx/normalizing-flows-study/actions/workflows/ci.yml/badge.svg)](https://github.com/itxtx/normalizing-flows-study/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.3-ee4c2c)
+
 
 <p align="center">
   <img src="assets/gallery_density.png" width="100%" alt="A grid showing Real NVP learning four 2D distributions: target data, learned density, and generated samples for two-moons, circles, checkerboard, and spirals.">
@@ -36,9 +35,7 @@ This repo implements the major flow families behind that idea, each as a small, 
   <img src="assets/latent_interpolation.png" width="92%" alt="Left: regular grid and a straight line in Gaussian latent space. Right: the same grid and line warped onto the two-moons data manifold over the learned density.">
 </p>
 
-**Convergence and invertibility.**
-
-
+**Invertibility.**
 
 <p align="center">
 <img src="assets/reconstruction_error.png" width="100%" alt="Real NVP round-trip reconstruction overlay and a histogram of reconstruction error at float32 machine precision.">
@@ -48,11 +45,6 @@ This repo implements the major flow families behind that idea, each as a small, 
 
 <p align="center">
   <img src="assets/cnf_trajectories.png" width="100%" alt="Four time snapshots of a Gaussian point cloud transported along a learned velocity field onto the two-moons target, with velocity-field arrows.">
-</p>
-
-<p align="center">
-  <img src="assets/benchmark.png" width="45%" alt="Log-log scatter of parameter count versus sampling throughput for Real NVP, Spline, MAF, IAF, and CNF.">
-  <img src="assets/training_curves.png" width="45%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
 </p>
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).
@@ -182,15 +174,6 @@ python plots/fig_cnf.py                           # continuous-flow trajectories
 python plots/fig_benchmark.py                     # params vs sampling throughput
 ```
 
-## Known issues / good first fixes
-
-Building the figures surfaced a few real bugs — useful entry points for contributors:
-
-- **Continuous flow can't learn a density.** `ODEFunc` hard-codes the log-determinant dynamics to zero (`trace_approx = torch.zeros(...)`), so maximum-likelihood CNF training collapses to the trivial solution. It needs a proper divergence estimate (exact trace for 2D, or Hutchinson's estimator). The continuous-flow figure here trains the velocity field with a flow-matching objective to work around this.
-- **MAF/IAF densities blow up in eval mode.** The MADE conditioner uses `BatchNorm1d`, whose running statistics are miscalibrated after full-batch training, so eval-mode density evaluation explodes. Recalibrating the running stats (or switching to a flow-friendly normalization) fixes it.
-- **Spline coupling produces non-invertible, spiky densities.** `RealNVPSpline` round-trips with large reconstruction error and density spikes (~1e12), pointing to a bin/tail handling bug in the rational-quadratic spline.
-
-Real NVP is numerically solid (bit-exact invertibility, calibrated likelihoods), which is why it anchors most figures.
 
 ## References
 
