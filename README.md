@@ -39,18 +39,21 @@ This repo implements the major flow families behind that idea, each as a small, 
 **Convergence and invertibility.**
 
 <p align="center">
-  <img src="assets/training_curves.png" width="49%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
-  <img src="assets/reconstruction_error.png" width="49%" alt="Real NVP round-trip reconstruction overlay and a histogram of reconstruction error at float32 machine precision.">
+  <img src="assets/training_curves.png" width="100%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
+</p>
+
+<p align="center">
+<img src="assets/reconstruction_error.png" width="100%" alt="Real NVP round-trip reconstruction overlay and a histogram of reconstruction error at float32 machine precision.">
 </p>
 
 **Continuous flows and a speed/size comparison.** Left: a point cloud transported along the learned ODE velocity field from Gaussian to data. Right: parameters vs. sampling throughput across flow families.
 
 <p align="center">
-  <img src="assets/cnf_trajectories.png" width="60%" alt="Four time snapshots of a Gaussian point cloud transported along a learned velocity field onto the two-moons target, with velocity-field arrows.">
+  <img src="assets/cnf_trajectories.png" width="100%" alt="Four time snapshots of a Gaussian point cloud transported along a learned velocity field onto the two-moons target, with velocity-field arrows.">
 </p>
 
 <p align="center">
-  <img src="assets/benchmark.png" width="78%" alt="Log-log scatter of parameter count versus sampling throughput for Real NVP, Spline, MAF, IAF, and CNF.">
+  <img src="assets/benchmark.png" width="50%" alt="Log-log scatter of parameter count versus sampling throughput for Real NVP, Spline, MAF, IAF, and CNF.">
 </p>
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).

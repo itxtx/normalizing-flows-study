@@ -24,13 +24,13 @@ from src.models import RealNVP
 import _common as C
 
 # ---- notebook recipe (override via env for a faster preview) ----
-DATA_DIM    = 2
-N_SAMPLES   = int(os.environ.get("GIF_SAMPLES", 20000))
-N_LAYERS    = int(os.environ.get("GIF_LAYERS", 8))
-HIDDEN_DIM  = int(os.environ.get("GIF_HIDDEN", 256))
-LR          = float(os.environ.get("GIF_LR", 1e-3))
-N_EPOCHS    = int(os.environ.get("GIF_EPOCHS", 1000))
-BATCH_SIZE  = int(os.environ.get("GIF_BATCH", 1024))
+DATA_DIM = 2
+N_SAMPLES = int(os.environ.get("GIF_SAMPLES", 20000))
+N_LAYERS = int(os.environ.get("GIF_LAYERS", 8))
+HIDDEN_DIM = int(os.environ.get("GIF_HIDDEN", 256))
+LR = float(os.environ.get("GIF_LR", 1e-3))
+N_EPOCHS = int(os.environ.get("GIF_EPOCHS", 250))
+BATCH_SIZE = int(os.environ.get("GIF_BATCH", 1024))
 
 LIM = 3.0
 RES = 110
@@ -56,7 +56,9 @@ def density_grid(model, device, lim=LIM, res=RES):
     xs = torch.linspace(-lim, lim, res)
     xx, yy = torch.meshgrid(xs, xs, indexing="xy")
     grid = torch.stack([xx.reshape(-1), yy.reshape(-1)], 1).to(device)
-    base = MultivariateNormal(torch.zeros(2, device=device), torch.eye(2, device=device))
+    base = MultivariateNormal(
+        torch.zeros(2, device=device), torch.eye(2, device=device)
+    )
     z, log_det = model.inverse(grid)
     dens = torch.exp(base.log_prob(z) + log_det).reshape(res, res)
     return xx.numpy(), yy.numpy(), dens.cpu().numpy()
@@ -65,12 +67,15 @@ def density_grid(model, device, lim=LIM, res=RES):
 def main():
     torch.manual_seed(0)
     device = get_device()
-    print(f"device: {device}  |  {N_LAYERS} layers, hidden {HIDDEN_DIM}, "
-          f"{N_SAMPLES} samples, {N_EPOCHS} epochs, batch {BATCH_SIZE}")
+    print(
+        f"device: {device}  |  {N_LAYERS} layers, hidden {HIDDEN_DIM}, "
+        f"{N_SAMPLES} samples, {N_EPOCHS} epochs, batch {BATCH_SIZE}"
+    )
 
     data = C.get_dataset("moons", N_SAMPLES).to(device)
-    base = MultivariateNormal(torch.zeros(DATA_DIM, device=device),
-                              torch.eye(DATA_DIM, device=device))
+    base = MultivariateNormal(
+        torch.zeros(DATA_DIM, device=device), torch.eye(DATA_DIM, device=device)
+    )
     model = RealNVP(DATA_DIM, N_LAYERS, HIDDEN_DIM).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -90,7 +95,7 @@ def main():
         running = 0.0
         nb = 0
         for i in range(0, n, BATCH_SIZE):
-            xb = data[perm[i:i + BATCH_SIZE]]
+            xb = data[perm[i : i + BATCH_SIZE]]
             z, log_det = model.inverse(xb)
             loss = -(base.log_prob(z) + log_det).mean()
             opt.zero_grad()
@@ -114,17 +119,23 @@ def main():
         fig = plt.figure(figsize=(4.4, 4.4))
         canvas = FigureCanvasAgg(fig)
         ax = fig.add_axes([0.04, 0.04, 0.92, 0.84])
-        ax.pcolormesh(xx, yy, dens, cmap=C.DENSITY_CMAP, vmin=0, vmax=vmax, shading="auto")
+        ax.pcolormesh(
+            xx, yy, dens, cmap=C.DENSITY_CMAP, vmin=0, vmax=vmax, shading="auto"
+        )
         ax.scatter(d_np[:, 0], d_np[:, 1], s=0.6, c="#111827", alpha=0.10, linewidths=0)
-        ax.set_xlim(-LIM, LIM); ax.set_ylim(-LIM, LIM)
-        ax.set_xticks([]); ax.set_yticks([])
-        label = f"Real NVP — epoch {ep:4d}" + ("" if np.isnan(nll) else f"   NLL {nll:.2f}")
+        ax.set_xlim(-LIM, LIM)
+        ax.set_ylim(-LIM, LIM)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        label = f"Real NVP — epoch {ep:4d}" + (
+            "" if np.isnan(nll) else f"   NLL {nll:.2f}"
+        )
         ax.set_title(label, fontsize=12.5, color=C.AGENT, fontweight="bold")
         canvas.draw()
         imgs.append(np.asarray(canvas.buffer_rgba())[..., :3].copy())
         plt.close(fig)
 
-    seq = [imgs[0]] * 4 + imgs + [imgs[-1]] * 8   # hold first/last
+    seq = [imgs[0]] * 4 + imgs + [imgs[-1]] * 8  # hold first/last
     out = f"{C.ASSETS}/training_progress.gif"
     imageio.mimsave(out, seq, duration=0.16, loop=0)
     print("wrote", out, "| frames:", len(seq))
