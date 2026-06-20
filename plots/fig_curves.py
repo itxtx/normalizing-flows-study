@@ -46,7 +46,7 @@ def main():
 
     ax.set_xlabel("Training epoch")
     ax.set_ylabel("Negative log-likelihood  (nats, lower = better)")
-    ax.set_xlim(0, 900)
+    ax.set_xlim(0, 700)
     ax.set_ylim(1.3, 3.0)  # clip an early transient spike on checkerboard
     C.style_axes(ax, grid_axis="both")
     ax.legend(loc="upper right", frameon=False, title="Target distribution")

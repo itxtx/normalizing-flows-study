@@ -6,9 +6,9 @@ A from-scratch, PyTorch implementation of normalizing flows for density estimati
 
 
 <p align="center">
-  <img src="assets/gallery_density.png" width="100%" alt="A grid showing Real NVP learning four 2D distributions: target data, learned density, and generated samples for two-moons, circles, checkerboard, and spirals.">
+  <img src="assets/gallery_density.png" width="100%" alt="A grid: rows are four 2D distributions (two-moons, circles, checkerboard, spirals); columns are the target data and the learned densities of RealNVP, spline, and MAF flows.">
   <br>
-  <em>One model class (Real NVP), trained by maximum likelihood, learning to model and generate four 2D distributions.</em>
+  <em>Coupling (RealNVP), spline, and autoregressive (MAF) flows, each trained by maximum likelihood, learning four 2D distributions.</em>
 </p>
 
 ---
@@ -41,10 +41,22 @@ This repo implements the major flow families behind that idea, each as a small, 
 <img src="assets/reconstruction_error.png" width="100%" alt="Real NVP round-trip reconstruction overlay and a histogram of reconstruction error at float32 machine precision.">
 </p>
 
-**Continuous flows and a speed/size comparison.** Left: a point cloud transported along the learned ODE velocity field from Gaussian to data. Right: parameters vs. sampling throughput across flow families.
+**Continuous flow.** A maximum-likelihood-trained CNF transports the Gaussian base along its learned ODE velocity field onto the two-moons target:
 
 <p align="center">
   <img src="assets/cnf_trajectories.png" width="100%" alt="Four time snapshots of a Gaussian point cloud transported along a learned velocity field onto the two-moons target, with velocity-field arrows.">
+</p>
+
+**How the families compare.** Test NLL vs. parameter count on two-moons, with marker size encoding sampling throughput:
+
+<p align="center">
+  <img src="assets/benchmark.png" width="75%" alt="Scatter of test NLL versus parameter count for RealNVP, spline, MAF, IAF, and CNF, with marker size showing sampling throughput.">
+</p>
+
+**Convergence.** Real NVP negative log-likelihood vs. epoch on each distribution (with a bits/dim axis):
+
+<p align="center">
+  <img src="assets/training_curves.png" width="70%" alt="Negative log-likelihood versus training epoch for Real NVP on four distributions, with a bits/dim axis.">
 </p>
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).

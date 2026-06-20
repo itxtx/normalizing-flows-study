@@ -175,8 +175,12 @@ FLOW_LABEL = {
     "iaf": "IAF", "cnf": "CNF",
 }
 
-# sensible epoch budgets (full-batch) keeping each train < ~30s on CPU
-EPOCHS = {"realnvp": 500, "spline": 240, "maf": 1000, "iaf": 600, "cnf": 50}
+# sensible epoch budgets (full-batch) keeping each train < ~40s on CPU
+EPOCHS = {"realnvp": 700, "spline": 250, "maf": 800, "iaf": 600, "cnf": 45}
+# per-flow learning rate (RealNVP/Spline need a lower LR for stability)
+LR = {"realnvp": 1e-3, "spline": 5e-4, "maf": 1e-3, "iaf": 1e-3, "cnf": 2e-2}
+# CNF integrates an ODE per point, so train it on fewer points to stay fast
+NDATA = {"realnvp": 2000, "spline": 2000, "maf": 2000, "iaf": 2000, "cnf": 600}
 
 
 def base_dist(dim=2):
@@ -187,14 +191,17 @@ def count_params(model):
     return sum(p.numel() for p in model.parameters())
 
 
-def train(model, data, epochs, lr=3e-3, grad_clip=5.0, record=True):
-    """Full-batch maximum-likelihood training. Returns the NLL curve (nats)."""
+def train(model, data, epochs, lr=1e-3, grad_clip=5.0, record=True):
+    """Full-batch maximum-likelihood training. Returns the NLL curve (nats).
+    Skips any step whose loss is non-finite (defensive against rare blow-ups)."""
     base = base_dist(data.shape[1])
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     curve = []
     for ep in range(epochs):
         z, log_det = model.inverse(data)
         loss = -(base.log_prob(z) + log_det).mean()
+        if not torch.isfinite(loss):
+            break
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)

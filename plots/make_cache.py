@@ -45,11 +45,11 @@ def main(tokens):
     torch.manual_seed(0)
     pairs = expand(tokens)
     for ds, fl in pairs:
-        data = C.get_dataset(ds, n=2000, seed=0)
+        data = C.get_dataset(ds, n=C.NDATA.get(fl, 2000), seed=0)
         model = C.build_model(fl)
         epochs = C.EPOCHS[fl]
         t = time.time()
-        curve = C.train(model, data, epochs=epochs)
+        curve = C.train(model, data, epochs=epochs, lr=C.LR.get(fl, 1e-3))
         dt = time.time() - t
         C.save_cache(ds, fl, model, curve, dt)
         print(f"cached {ds:13s} {fl:8s} epochs={epochs:5d} "
