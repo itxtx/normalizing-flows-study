@@ -9,11 +9,11 @@ class InverseAutoregressiveFlow(Flow):
     The forward transformation (sampling) is fast and parallel.
     The inverse transformation (density evaluation) is slow and sequential.
     """
-    def __init__(self, dim, hidden_dim=64):
+    def __init__(self, dim, hidden_dim=64, use_batch_norm=False):
         super().__init__()
         self.data_dim = dim
         self.dim = dim
-        self.conditioner = MADE(dim, hidden_dim, 2)
+        self.conditioner = MADE(dim, hidden_dim, 2, use_batch_norm=use_batch_norm)
         
         # Initialize the conditioner to produce near-zero outputs initially
         self._initialize_conditioner()

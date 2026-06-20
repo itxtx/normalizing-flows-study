@@ -49,12 +49,14 @@ class SplineCouplingLayer(Flow):
 
         self.register_buffer('mask', mask)
 
+        # NOTE: no BatchNorm here. BatchNorm in the conditioner has miscalibrated
+        # running stats at eval time, which makes the spline parameters (and thus
+        # the whole transform) differ between train and eval and blows up the
+        # density. Use a plain MLP; normalize between coupling layers if needed.
         self.param_net = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim * (3 * num_bins - 1))
         )
@@ -204,7 +206,8 @@ class SplineCouplingLayer(Flow):
         widths = torch.clamp(widths, min=eps)  # Ensure positive widths
 
         cum_widths = torch.cumsum(widths, dim=-1)
-        cum_widths = F.pad(cum_widths, pad=(0, 0, 1, 0), mode='constant', value=0.0)
+        # Prepend a zero boundary on the *bins* axis (last dim) -> num_bins+1 knots.
+        cum_widths = F.pad(cum_widths, pad=(1, 0), mode='constant', value=0.0)
         cum_widths = (2 * self.bound) * cum_widths + (-self.bound)
         cum_widths[..., 0] = -self.bound
         cum_widths[..., -1] = self.bound
@@ -216,7 +219,8 @@ class SplineCouplingLayer(Flow):
         heights = torch.clamp(heights, min=eps)  # Ensure positive heights
 
         cum_heights = torch.cumsum(heights, dim=-1)
-        cum_heights = F.pad(cum_heights, pad=(0, 0, 1, 0), mode='constant', value=0.0)
+        # Prepend a zero boundary on the *bins* axis (last dim) -> num_bins+1 knots.
+        cum_heights = F.pad(cum_heights, pad=(1, 0), mode='constant', value=0.0)
         cum_heights = (2 * self.bound) * cum_heights + (-self.bound)
         cum_heights[..., 0] = -self.bound
         cum_heights[..., -1] = self.bound
@@ -233,11 +237,10 @@ class SplineCouplingLayer(Flow):
             boundaries = cum_heights.contiguous().view(-1, cum_heights.shape[-1])  # [B * D, num_bins+1]
         else:
             boundaries = cum_widths.contiguous().view(-1, cum_widths.shape[-1])  # [B * D, num_bins+1]
-        # Row-wise searchsorted for each [B*D] pair
-        bin_idx = torch.stack([
-            torch.searchsorted(boundaries[i], flat_inputs[i], right=True) - 1
-            for i in range(flat_inputs.shape[0])
-        ])
+        # Batched row-wise searchsorted (one call, no Python loop).
+        bin_idx = torch.searchsorted(
+            boundaries, flat_inputs.unsqueeze(-1), right=True
+        ).squeeze(-1) - 1
         bin_idx = torch.clamp(bin_idx, 0, self.num_bins - 1)
 
         # Gather all parameters for each [batch, dim] pair
@@ -259,26 +262,17 @@ class SplineCouplingLayer(Flow):
         xi = None
         if inverse:
             y = flat_inputs
-            # Solve quadratic equation for xi
+            # Solve the rational-quadratic equation for xi in [0, 1].
             a = (y - y_k) * (d_k + d_k1 - 2 * s_k) + h_k * (s_k - d_k)
             b = h_k * d_k - (y - y_k) * (d_k + d_k1 - 2 * s_k)
             c = -s_k * (y - y_k)
-            linear_mask = torch.abs(a) < eps
-            quadratic_mask = ~linear_mask
-            xi = torch.zeros_like(y)
-            # Linear case
-            if linear_mask.any():
-                xi[linear_mask] = -c[linear_mask] / torch.clamp(b[linear_mask], min=eps)
-            # Quadratic case
-            if quadratic_mask.any():
-                a_quad = a[quadratic_mask]
-                b_quad = b[quadratic_mask]
-                c_quad = c[quadratic_mask]
-                discriminant = b_quad.pow(2) - 4 * a_quad * c_quad
-                discriminant = torch.clamp(discriminant, min=0)
-                sqrt_disc = torch.sqrt(discriminant)
-                xi[quadratic_mask] = (-b_quad - sqrt_disc) / (2 * torch.clamp(a_quad, min=eps))
-            xi = torch.clamp(xi, 0, 1)
+            discriminant = torch.clamp(b.pow(2) - 4 * a * c, min=0.0)
+            # Monotone branch via the citardauq form  xi = 2c / (-b - sqrt(disc)),
+            # per Durkan et al. (2019). The naive (-b - sqrt)/(2a) picks the wrong
+            # root and makes the spline non-invertible.
+            denom = -b - torch.sqrt(discriminant)
+            denom = torch.where(denom.abs() < eps, torch.full_like(denom, eps), denom)
+            xi = torch.clamp((2 * c) / denom, 0, 1)
             transformed_outputs = xi * w_k + z_k
             denominator_ld = s_k + (d_k1 + d_k - 2 * s_k) * xi * (1 - xi)
             numerator_ld = s_k.pow(2) * (d_k1 * xi.pow(2) + 2 * s_k * xi * (1 - xi) + d_k * (1 - xi).pow(2))

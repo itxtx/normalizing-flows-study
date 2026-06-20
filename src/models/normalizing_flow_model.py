@@ -35,8 +35,12 @@ class NormalizingFlowModel(nn.Module):
             # Apply batch normalization between layers if enabled
             if self.batch_norm_between_layers and i < len(self.flows) - 1:
                 bn = self.batch_norms[i]
-                z = bn(z)
-                # Batch norm affects the log-determinant
+                # Use running statistics for the affine so that the transform,
+                # its log-det, and its inverse all use the SAME constants and the
+                # layer is exactly invertible. (Calling bn(z) directly would use
+                # batch stats in train mode while the inverse uses running stats,
+                # breaking invertibility.)
+                z = self._apply_batch_norm(bn, z)
                 log_det_jacobian_sum += self._batch_norm_log_det_jacobian(bn, z)
                 
         return z, log_det_jacobian_sum
@@ -59,6 +63,26 @@ class NormalizingFlowModel(nn.Module):
             log_det_jacobian_sum += log_det_jacobian
             
         return x, log_det_jacobian_sum
+
+    def _apply_batch_norm(self, bn_layer, x):
+        """
+        Forward BatchNorm as an invertible flow layer, using running statistics
+        (so it matches _inverse_batch_norm exactly). In training mode the running
+        statistics are updated from the batch as a moving average, but the affine
+        applied here always uses the running stats for invertibility.
+        """
+        if self.training:
+            with torch.no_grad():
+                momentum = bn_layer.momentum if bn_layer.momentum is not None else 0.1
+                bn_layer.running_mean.mul_(1 - momentum).add_(momentum * x.mean(dim=0))
+                bn_layer.running_var.mul_(1 - momentum).add_(
+                    momentum * x.var(dim=0, unbiased=False))
+
+        gamma = bn_layer.weight.view(1, -1)
+        beta = bn_layer.bias.view(1, -1)
+        mean = bn_layer.running_mean.view(1, -1)
+        var = bn_layer.running_var.view(1, -1)
+        return (x - mean) / torch.sqrt(var + bn_layer.eps) * gamma + beta
 
     def _batch_norm_log_det_jacobian(self, bn_layer, x):
         """

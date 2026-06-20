@@ -9,7 +9,11 @@ class MADE(nn.Module):
     This network is autoregressive. For a given input x, the output for
     dimension i is only dependent on inputs x_j where j < i.
     """
-    def __init__(self, input_dim, hidden_dim, output_dim_multiplier=2, use_batch_norm=True):
+    def __init__(self, input_dim, hidden_dim, output_dim_multiplier=2, use_batch_norm=False):
+        # use_batch_norm defaults to False: BatchNorm in an autoregressive
+        # conditioner has miscalibrated running stats at eval time (eval-mode
+        # density blows up) and makes the per-sample likelihood batch-dependent
+        # at train time. Normalize between flow layers instead if needed.
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -48,17 +52,29 @@ class MADE(nn.Module):
         """
         masks = []
         
-        # Mask 1: input to hidden layer
+        # Mask 1: input -> hidden. Connect input j to hidden a iff deg(j) <= deg(a).
         m1 = (self.m[-1][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
         masks.append(torch.from_numpy(m1.astype(np.float32)))
 
-        # Mask 2: hidden to output layer
+        # Mask 1b: hidden -> hidden (used for every intermediate layer). Connect
+        # b -> a iff deg(b) <= deg(a). Without masking the intermediate layers,
+        # they remix hidden units across degrees and destroy the autoregressive
+        # property (this was the core MAF bug).
+        mhh = (self.m[0][:, np.newaxis] <= self.m[0][np.newaxis, :]).T
+        masks.append(torch.from_numpy(mhh.astype(np.float32)))
+
+        # Mask 2: hidden to output layer.
+        # Output is ordered [param0 for every dim, param1 for every dim, ...] so
+        # that MAF/IAF's `params.chunk(2)` yields (mu, alpha) aligned per dimension.
+        # Strict inequality (m[0] < m[1][i]) enforces the autoregressive property:
+        # the parameters for dimension i depend only on inputs j < i (so the
+        # Jacobian is triangular and log|det| = -sum(alpha) is exact).
         output_dim = self.input_dim * self.output_dim_multiplier
         m2 = np.zeros((output_dim, self.hidden_dim), dtype=np.float32)
-        for i in range(self.input_dim):
-            for k in range(self.output_dim_multiplier):
-                out_idx = i * self.output_dim_multiplier + k
-                m2[out_idx, :] = (self.m[0] <= self.m[1][i]).astype(np.float32)
+        for k in range(self.output_dim_multiplier):
+            for i in range(self.input_dim):
+                out_idx = k * self.input_dim + i
+                m2[out_idx, :] = (self.m[0] < self.m[1][i]).astype(np.float32)
         masks.append(torch.from_numpy(m2))
         return masks
 
@@ -78,22 +94,22 @@ class MADE(nn.Module):
             layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
         
-        second_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
+        second_layer = MaskedLinear(self.hidden_dim, self.hidden_dim, mask=self.masks[1])
         layers.append(second_layer)
         if self.use_batch_norm:
             layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
-        
-        third_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
+
+        third_layer = MaskedLinear(self.hidden_dim, self.hidden_dim, mask=self.masks[1])
         layers.append(third_layer)
         if self.use_batch_norm:
             layers.append(nn.BatchNorm1d(self.hidden_dim))
         layers.append(nn.ReLU())
-        
+
         final_layer = MaskedLinear(
-            self.hidden_dim, 
-            self.input_dim * self.output_dim_multiplier, 
-            mask=self.masks[1]
+            self.hidden_dim,
+            self.input_dim * self.output_dim_multiplier,
+            mask=self.masks[2]
         )
         layers.append(final_layer)
         
@@ -121,6 +137,4 @@ class MADE(nn.Module):
         """
         The forward pass of the conditioner network.
         """
-        output = self.net(x)
-        # More conservative clamping to prevent extreme values
-        return torch.clamp(output, min=-2.0, max=2.0)
+        return self.net(x)
