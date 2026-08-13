@@ -1,5 +1,6 @@
 from .flow.flow import Flow
 from .flow.sequential_flow import SequentialFlow
+from .flow.permutation import Permutation
 from .autoregressive.masked_linear import MaskedLinear
 from .autoregressive.made import MADE
 from .autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
@@ -18,6 +19,7 @@ from .advanced.causal_transformer import CausalTransformer
 __all__ = [
     "Flow",
     "SequentialFlow",
+    "Permutation",
     "MaskedLinear",
     "MADE",
     "MaskedAutoregressiveFlow",

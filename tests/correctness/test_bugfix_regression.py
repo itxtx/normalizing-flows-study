@@ -14,6 +14,7 @@ from src.models import RealNVPSpline, NormalizingFlowModel
 from src.flows import (
     ARQS,
     CouplingLayer,
+    Permutation,
     MaskedAutoregressiveFlow,
     InverseAutoregressiveFlow,
     ContinuousFlow,
@@ -99,6 +100,23 @@ def test_coupling_transform_is_batch_independent():
     alone, _ = layer(target)
     batched, _ = layer(torch.cat([target, torch.randn(7, 2)]))
     assert torch.allclose(alone, batched[:1], atol=1e-7)
+
+
+def test_permuted_maf_can_condition_both_axes():
+    first = MaskedAutoregressiveFlow(2, 16)
+    second = MaskedAutoregressiveFlow(2, 16)
+    model = NormalizingFlowModel([first, Permutation([1, 0]), second]).eval()
+    x = torch.randn(8, 2)
+    transformed, forward_log_det = model.forward(x)
+    reconstructed, inverse_log_det = model.inverse(transformed)
+
+    assert torch.allclose(reconstructed, x, atol=1e-5)
+    assert torch.allclose(forward_log_det, -inverse_log_det, atol=1e-5)
+
+    jacobian = torch.autograd.functional.jacobian(
+        lambda value: model.inverse(value.unsqueeze(0))[0].squeeze(0), x[0]
+    )
+    assert jacobian[0, 1].abs() > 0
 
 
 # --------------------------------------------------------------------------- #

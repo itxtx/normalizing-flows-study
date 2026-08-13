@@ -14,6 +14,7 @@ from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregr
 from src.flows.spline.spline_coupling_layer import SplineCouplingLayer
 from src.flows.spline.arqs import ARQS
 from src.flows.continuous.continuous_flow import ContinuousFlow
+from src.flows.flow.permutation import Permutation
 from src.models.real_nvp import RealNVP
 from src.models.real_nvp_spline import RealNVPSpline
 from src.models.normalizing_flow_model import NormalizingFlowModel
@@ -43,6 +44,7 @@ def get_all_flow_classes():
         MaskedAutoregressiveFlow(dim, hidden_dim),
         InverseAutoregressiveFlow(dim, hidden_dim),
         ARQS(dim, hidden_dim, num_bins=4),
+        Permutation(torch.arange(dim - 1, -1, -1)),
     ]
     
     # Continuous flow (special case due to different interface)
