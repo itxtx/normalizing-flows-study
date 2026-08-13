@@ -22,6 +22,7 @@ from src.flows import (
     MaskedAutoregressiveFlow,
     InverseAutoregressiveFlow,
     ContinuousFlow,
+    Permutation,
 )
 
 # --------------------------------------------------------------------------- #
@@ -162,7 +163,13 @@ def build_model(name, dim=2):
     if name == "spline":
         return RealNVPSpline(dim, 8, 64)
     if name == "maf":
-        return NormalizingFlowModel([MaskedAutoregressiveFlow(dim, 64) for _ in range(6)])
+        layers = []
+        reverse = torch.arange(dim - 1, -1, -1)
+        for index in range(6):
+            layers.append(MaskedAutoregressiveFlow(dim, 64))
+            if index < 5:
+                layers.append(Permutation(reverse))
+        return NormalizingFlowModel(layers)
     if name == "iaf":
         return NormalizingFlowModel([InverseAutoregressiveFlow(dim, 64) for _ in range(6)])
     if name == "cnf":
@@ -223,9 +230,7 @@ def model_samples(model, n=4000, dim=2):
 
 
 def recalibrate_bn(model, data, passes=50):
-    """MADE-based flows (MAF/IAF) use BatchNorm; their eval-mode running stats
-    can be miscalibrated after full-batch training, which blows up density
-    evaluation. Recompute cumulative running stats from the data, then eval."""
+    """Recompute BatchNorm running statistics for models that contain it."""
     bns = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm1d)]
     if not bns:
         return model
