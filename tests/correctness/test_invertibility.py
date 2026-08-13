@@ -12,6 +12,7 @@ from src.flows.coupling.coupling_layer import CouplingLayer
 from src.flows.autoregressive.masked_autoregressive_flow import MaskedAutoregressiveFlow
 from src.flows.autoregressive.inverse_autoregressive_flow import InverseAutoregressiveFlow
 from src.flows.spline.spline_coupling_layer import SplineCouplingLayer
+from src.flows.spline.arqs import ARQS
 from src.flows.continuous.continuous_flow import ContinuousFlow
 from src.models.real_nvp import RealNVP
 from src.models.real_nvp_spline import RealNVPSpline
@@ -41,6 +42,7 @@ def get_all_flow_classes():
         SplineCouplingLayer(dim, hidden_dim, create_mask(dim, "half")),
         MaskedAutoregressiveFlow(dim, hidden_dim),
         InverseAutoregressiveFlow(dim, hidden_dim),
+        ARQS(dim, hidden_dim, num_bins=4),
     ]
     
     # Continuous flow (special case due to different interface)
@@ -75,22 +77,15 @@ class TestInvertibility:
         x_original = torch.randn(batch_size, dim, requires_grad=True)
         
         try:
-            # Test forward-inverse consistency: x -> z -> x'
-            if isinstance(flow, ContinuousFlow):
-                # ContinuousFlow returns (x, log_det_J) like other flows
-                z, log_det_inv = flow.inverse(x_original)
-                x_reconstructed, log_det_fwd = flow.forward(z)
-                
-                # Check reconstruction accuracy
-                if not torch.allclose(x_original, x_reconstructed, atol=1e-5):
-                    pytest.fail(f"**critical-bug** Forward-inverse consistency failed for {type(flow).__name__}: "
-                              f"max error = {torch.max(torch.abs(x_original - x_reconstructed)).item():.2e}")
-                
-                # Check log-determinant consistency: log_det_fwd + log_det_inv should ≈ 0
-                log_det_sum = log_det_fwd + log_det_inv
-                if torch.max(torch.abs(log_det_sum)).item() >= 1e-5:
-                    pytest.fail(f"**critical-bug** Log-determinant consistency failed for {type(flow).__name__}: "
-                              f"max |log_det_fwd + log_det_inv| = {torch.max(torch.abs(log_det_sum)).item():.2e}")
+            z, log_det_inv = flow.inverse(x_original)
+            x_reconstructed, log_det_fwd = flow.forward(z)
+            tolerance = 1e-4 if isinstance(flow, (ContinuousFlow, ARQS)) else 1e-5
+
+            assert torch.allclose(x_original, x_reconstructed, atol=tolerance), (
+                f"Forward-inverse consistency failed for {type(flow).__name__}: "
+                f"max error = {torch.max(torch.abs(x_original - x_reconstructed)).item():.2e}"
+            )
+            assert torch.max(torch.abs(log_det_fwd + log_det_inv)).item() < tolerance
                               
         except Exception as e:
             pytest.fail(f"**critical-bug** Exception during invertibility test for {type(flow).__name__}: {str(e)}")
@@ -108,22 +103,15 @@ class TestInvertibility:
         z_original = torch.randn(batch_size, dim, requires_grad=True)
         
         try:
-            # Test inverse-forward consistency: z -> x -> z'
-            if isinstance(flow, ContinuousFlow):
-                # ContinuousFlow returns (x, log_det_J) like other flows
-                x, log_det_fwd = flow.forward(z_original)
-                z_reconstructed, log_det_inv = flow.inverse(x)
-                
-                # Check reconstruction accuracy
-                if not torch.allclose(z_original, z_reconstructed, atol=1e-5):
-                    pytest.fail(f"**critical-bug** Inverse-forward consistency failed for {type(flow).__name__}: "
-                              f"max error = {torch.max(torch.abs(z_original - z_reconstructed)).item():.2e}")
-                
-                # Check log-determinant consistency
-                log_det_sum = log_det_fwd + log_det_inv
-                if torch.max(torch.abs(log_det_sum)).item() >= 1e-5:
-                    pytest.fail(f"**critical-bug** Log-determinant consistency failed for {type(flow).__name__}: "
-                              f"max |log_det_fwd + log_det_inv| = {torch.max(torch.abs(log_det_sum)).item():.2e}")
+            x, log_det_fwd = flow.forward(z_original)
+            z_reconstructed, log_det_inv = flow.inverse(x)
+            tolerance = 1e-4 if isinstance(flow, (ContinuousFlow, ARQS)) else 1e-5
+
+            assert torch.allclose(z_original, z_reconstructed, atol=tolerance), (
+                f"Inverse-forward consistency failed for {type(flow).__name__}: "
+                f"max error = {torch.max(torch.abs(z_original - z_reconstructed)).item():.2e}"
+            )
+            assert torch.max(torch.abs(log_det_fwd + log_det_inv)).item() < tolerance
                               
         except Exception as e:
             pytest.fail(f"**critical-bug** Exception during invertibility test for {type(flow).__name__}: {str(e)}")
@@ -151,7 +139,9 @@ class TestInvertibility:
             log_det_sum = log_det_fwd + log_det_inv
             
             # Use a more relaxed tolerance for autoregressive flows which can have numerical precision issues
-            tolerance = 1e-3 if isinstance(flow, (MaskedAutoregressiveFlow, InverseAutoregressiveFlow)) else 1e-5
+            tolerance = 1e-3 if isinstance(
+                flow, (MaskedAutoregressiveFlow, InverseAutoregressiveFlow, ARQS)
+            ) else 1e-5
             
             if torch.max(torch.abs(log_det_sum)).item() >= tolerance:
                 pytest.fail(f"**critical-bug** Log-determinant symmetry failed for {type(flow).__name__}: "

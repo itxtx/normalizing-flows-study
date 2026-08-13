@@ -71,13 +71,6 @@ class NormalizingFlowModel(nn.Module):
         statistics are updated from the batch as a moving average, but the affine
         applied here always uses the running stats for invertibility.
         """
-        if self.training:
-            with torch.no_grad():
-                momentum = bn_layer.momentum if bn_layer.momentum is not None else 0.1
-                bn_layer.running_mean.mul_(1 - momentum).add_(momentum * x.mean(dim=0))
-                bn_layer.running_var.mul_(1 - momentum).add_(
-                    momentum * x.var(dim=0, unbiased=False))
-
         gamma = bn_layer.weight.view(1, -1)
         beta = bn_layer.bias.view(1, -1)
         mean = bn_layer.running_mean.view(1, -1)

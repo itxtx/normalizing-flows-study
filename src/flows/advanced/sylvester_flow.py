@@ -51,7 +51,7 @@ class HouseholderReflection(nn.Module):
             Hx: Reflected tensor with same shape as input
         """
         # Normalize v to avoid numerical issues
-        v_norm_sq = torch.sum(self.v ** 2) + 1e-8
+        v_norm_sq = torch.sum(self.v ** 2).clamp_min(torch.finfo(self.v.dtype).tiny)
         
         # Compute v^T x
         if x.dim() == 1:
@@ -70,7 +70,7 @@ class HouseholderReflection(nn.Module):
         Returns:
             H: Householder matrix [dim, dim]
         """
-        v_norm_sq = torch.sum(self.v ** 2) + 1e-8
+        v_norm_sq = torch.sum(self.v ** 2).clamp_min(torch.finfo(self.v.dtype).tiny)
         I = torch.eye(self.dim, device=self.v.device, dtype=self.v.dtype)
         H = I - 2 * torch.outer(self.v, self.v) / v_norm_sq
         return H

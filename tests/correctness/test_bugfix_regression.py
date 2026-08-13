@@ -12,6 +12,8 @@ from torch.distributions import MultivariateNormal
 
 from src.models import RealNVPSpline, NormalizingFlowModel
 from src.flows import (
+    ARQS,
+    CouplingLayer,
     MaskedAutoregressiveFlow,
     InverseAutoregressiveFlow,
     ContinuousFlow,
@@ -74,6 +76,31 @@ def test_spline_invertible_and_calibrated():
     assert 0.0 < nll_eval < 4.0
 
 
+def test_arqs_has_invertible_identity_tails():
+    torch.manual_seed(0)
+    model = ARQS(2, hidden_dim=16, num_bins=4).eval()
+    x = torch.tensor([[-2.0, 0.2], [-1.0, 0.8], [0.2, 1.5]])
+    y, forward_log_det = model.forward(x)
+    reconstructed, inverse_log_det = model.inverse(y)
+
+    assert torch.allclose(reconstructed, x, atol=1e-5)
+    assert torch.allclose(forward_log_det, -inverse_log_det, atol=1e-4)
+    assert y[0, 0] == x[0, 0]
+
+
+def test_coupling_transform_is_batch_independent():
+    torch.manual_seed(0)
+    layer = CouplingLayer(2, 16, torch.tensor([1.0, 0.0])).train()
+    with torch.no_grad():
+        layer.s_net[-1].weight.normal_(0, 0.2)
+        layer.b_net[-1].weight.normal_(0, 0.2)
+
+    target = torch.tensor([[0.25, -0.4]])
+    alone, _ = layer(target)
+    batched, _ = layer(torch.cat([target, torch.randn(7, 2)]))
+    assert torch.allclose(alone, batched[:1], atol=1e-7)
+
+
 # --------------------------------------------------------------------------- #
 # MAF / IAF
 # --------------------------------------------------------------------------- #
@@ -128,6 +155,14 @@ def test_cnf_logdet_matches_autodiff():
         J = torch.autograd.functional.jacobian(
             lambda v: model.inverse(v.unsqueeze(0))[0].squeeze(0), x[i])
         assert abs(torch.logdet(J).item() - ld[i].item()) < 1e-3
+
+
+def test_cnf_does_not_clip_states():
+    model = ContinuousFlow(2, 16)
+    x = torch.tensor([[20.0, -20.0]])
+    y, log_det = model.forward(x)
+    assert torch.allclose(y, x)
+    assert torch.allclose(log_det, torch.zeros_like(log_det))
 
 
 def test_cnf_training_reduces_nll():

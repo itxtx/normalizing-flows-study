@@ -246,7 +246,6 @@ class TestNeuralAutoregressiveFlow:
             {"hidden_dims": [128, 64, 32], "activation": "gelu"},
             {"hidden_dims": [64, 64], "use_layer_norm": False},
             {"hidden_dims": [64, 64], "use_residual": False},
-            {"hidden_dims": [64, 64], "dropout": 0.2},
         ]
         
         for config in configs:
@@ -257,6 +256,12 @@ class TestNeuralAutoregressiveFlow:
             assert log_det.shape == (batch_size,)
             assert not torch.isnan(z).any()
             assert not torch.isnan(log_det).any()
+
+        with pytest.raises(ValueError, match="Dropout"):
+            NeuralAutoregressiveFlow(dim=dim, hidden_dims=[64, 64], dropout=0.2)
+
+        with pytest.raises(ValueError, match="LayerNorm"):
+            NeuralAutoregressiveFlow(dim=dim, hidden_dims=[64, 64], use_layer_norm=True)
     
     def test_sampling_and_log_prob(self):
         """Test sampling and log probability computation."""

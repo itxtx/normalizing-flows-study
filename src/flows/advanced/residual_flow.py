@@ -39,46 +39,37 @@ class SpectralNorm(nn.Module):
         self.register_buffer('v', torch.randn(weight.size(1)))
         
         # Normalize initial vectors
-        self.u.data = F.normalize(self.u.data, dim=0)
-        self.v.data = F.normalize(self.v.data, dim=0)
+        with torch.no_grad():
+            self.u.copy_(F.normalize(self.u, dim=0))
+            self.v.copy_(F.normalize(self.v, dim=0))
     
-    def forward(self, *args, **kwargs):
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Apply spectral normalization and forward through module."""
         weight = self.module.weight
-        
-        # Power iteration to compute spectral norm
-        u = self.u
-        v = self.v
-        
-        for _ in range(self.n_power_iterations):
-            v = F.normalize(torch.mv(weight.t(), u), dim=0)
-            u = F.normalize(torch.mv(weight, v), dim=0)
-        
-        # Compute spectral norm
-        sigma = torch.dot(u, torch.mv(weight, v))
-        
-        # Normalize weight matrix
-        if sigma > self.lipschitz_constant:
-            weight_normalized = weight * (self.lipschitz_constant / sigma)
-        else:
-            weight_normalized = weight
-        
-        # Temporarily replace weight data
-        original_weight_data = self.module.weight.data.clone()
-        self.module.weight.data = weight_normalized
-        
-        # Forward pass
-        output = self.module(*args, **kwargs)
-        
-        # Restore original weight data
-        self.module.weight.data = original_weight_data
-        
-        # Update u and v buffers
-        if self.training:
-            self.u.data = u
-            self.v.data = v
-        
-        return output
+
+        if not isinstance(self.module, nn.Linear):
+            raise TypeError("SpectralNorm currently supports nn.Linear modules only")
+
+        # Power iteration updates only the estimator vectors. The normalized weight
+        # remains in the autograd graph, unlike temporarily swapping Parameter.data.
+        with torch.no_grad():
+            u = self.u
+            v = self.v
+            for _ in range(self.n_power_iterations):
+                v = F.normalize(torch.mv(weight.t(), u), dim=0)
+                u = F.normalize(torch.mv(weight, v), dim=0)
+            if self.training:
+                self.u.copy_(u)
+                self.v.copy_(v)
+
+        # Clone the estimates because later forward calls may update the buffers
+        # before this graph is used by backward.
+        u_estimate = self.u.detach().clone()
+        v_estimate = self.v.detach().clone()
+        sigma = torch.dot(u_estimate, torch.mv(weight, v_estimate)).abs()
+        scale = torch.clamp(sigma / self.lipschitz_constant, min=1.0)
+        normalized_weight = weight / scale
+        return F.linear(inputs, normalized_weight, self.module.bias)
 
 
 class ResidualBlock(nn.Module):
