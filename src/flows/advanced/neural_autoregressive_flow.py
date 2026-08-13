@@ -28,7 +28,7 @@ class DeepMADE(nn.Module):
         hidden_dims: List[int],
         output_dim_multiplier: int = 2,
         activation: str = "relu",
-        use_layer_norm: bool = True,
+        use_layer_norm: bool = False,
         use_residual: bool = True,
         dropout: float = 0.0
     ):
@@ -39,6 +39,15 @@ class DeepMADE(nn.Module):
         self.use_layer_norm = use_layer_norm
         self.use_residual = use_residual
         self.dropout = dropout
+
+        if use_layer_norm:
+            raise ValueError(
+                "LayerNorm mixes autoregressive degree groups; use_layer_norm must be False"
+            )
+        if dropout:
+            raise ValueError(
+                "Dropout makes an invertible flow stochastic; dropout must be zero"
+            )
         
         # Activation function
         if activation == "relu":
@@ -156,7 +165,11 @@ class DeepMADE(nn.Module):
                 mask=self.masks[i]
             )
             
-            if self.use_residual and self.hidden_dims[i - 1] == self.hidden_dims[i]:
+            if (
+                self.use_residual
+                and self.hidden_dims[i - 1] == self.hidden_dims[i]
+                and np.array_equal(self.m[i - 1], self.m[i])
+            ):
                 # Residual connection
                 residual_block = ResidualBlock(
                     layer,
@@ -258,9 +271,9 @@ class NeuralAutoregressiveFlow(Flow):
         dim: int,
         hidden_dims: List[int] = [512, 512, 512],
         activation: str = "relu",
-        use_layer_norm: bool = True,
+        use_layer_norm: bool = False,
         use_residual: bool = True,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         clamp_alpha: float = 3.0,
         clamp_log_scale: float = 5.0
     ):
@@ -325,17 +338,6 @@ class NeuralAutoregressiveFlow(Flow):
         # Log-determinant of Jacobian
         log_det_jacobian = torch.sum(log_scale, dim=1)
         
-        # Handle numerical issues
-        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
-        log_det_jacobian = torch.where(
-            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
-            torch.zeros_like(log_det_jacobian),
-            log_det_jacobian
-        )
-        
-        # Final clamping for stability
-        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
-        
         return z, log_det_jacobian
     
     def forward(self, z):
@@ -373,19 +375,9 @@ class NeuralAutoregressiveFlow(Flow):
             log_scale_i = torch.clamp(log_scale_i, min=-self.clamp_log_scale, max=self.clamp_log_scale)
             scale_i = torch.exp(log_scale_i)
             
-            # Update x in-place for dimension i
-            x[:, i] = z[:, i] * scale_i + mu[:, i]
+            x_next = x.clone()
+            x_next[:, i] = z[:, i] * scale_i + mu[:, i]
+            x = x_next
             log_det_jacobian += log_scale_i
-        
-        # Handle numerical issues
-        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
-        log_det_jacobian = torch.where(
-            torch.isnan(log_det_jacobian) | torch.isinf(log_det_jacobian),
-            torch.zeros_like(log_det_jacobian),
-            log_det_jacobian
-        )
-        
-        # Final clamping for stability
-        log_det_jacobian = torch.clamp(log_det_jacobian, min=-100, max=100)
-        
+
         return x, log_det_jacobian

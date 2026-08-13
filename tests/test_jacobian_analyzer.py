@@ -138,7 +138,8 @@ class TestJacobianAnalyzer:
         fig = self.analyzer.plot_gradient_flow_analysis(self.flow, self.x)
         
         assert fig is not None
-        assert len(fig.axes) == 3  # Magnitude hist, direction field, magnitude by position
+        # Three data axes plus the colorbar axis.
+        assert len(fig.axes) == 4
         
         # Clean up
         plt.close(fig)

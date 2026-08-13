@@ -73,7 +73,11 @@ All figures are reproducible from `plots/` (see [Figures](#figures)).
 | **Sylvester** | `sylvester_flow` | van den Berg et al. (2018) |
 | **Residual** | `residual_flow` | Behrmann et al. (2019); Chen et al. (2019) |
 | **Neural autoregressive** | `neural_autoregressive_flow` | Huang et al. (2018) |
-| **Experimental** | `FlowMatchingFlow`, `ShortcutFlow`, `ConsistencyFlow`, `GuidedFlow`, `TarFlow`, transformer blocks | recent flow-matching / consistency literature |
+| **Experimental prototypes** | flow matching, shortcut, consistency, guidance, TarFlow, transformer blocks | recent flow-matching / consistency literature |
+
+Experimental prototypes live under `src/flows/advanced/`, but are intentionally
+not exported from `src.flows`: they do not yet provide the exact invertibility and
+log-determinant guarantees required by the public `Flow` contract.
 
 Models are assembled from these layers in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`).
 

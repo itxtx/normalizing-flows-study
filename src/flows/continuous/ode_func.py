@@ -27,7 +27,7 @@ class ODEFunc(nn.Module):
         t_col = t.expand(z.shape[0]).unsqueeze(1).to(z)
         return self.net(torch.cat([z, t_col], dim=1))
 
-    def forward(self, t, augmented_state):
+    def forward(self, t, augmented_state, trace_noise=None):
         """
         Augmented dynamics for a continuous normalizing flow.
 
@@ -63,11 +63,12 @@ class ODEFunc(nn.Module):
                     divergence = divergence + grad_i[:, i:i + 1]
             else:
                 # Hutchinson's stochastic trace estimator (FFJORD).
-                eps = torch.randn_like(z)
+                if trace_noise is None:
+                    raise ValueError("trace_noise must be fixed for dimensions above two")
                 vjp = torch.autograd.grad(
-                    dz_dt, z, grad_outputs=eps, create_graph=True, retain_graph=True
+                    dz_dt, z, grad_outputs=trace_noise, create_graph=True, retain_graph=True
                 )[0]
-                divergence = (vjp * eps).sum(dim=1, keepdim=True)
+                divergence = (vjp * trace_noise).sum(dim=1, keepdim=True)
 
         # ContinuousFlow integrates this field forward (t: 0->1) for sampling and
         # backward (t: 1->0) for density, returning the accumulated value directly

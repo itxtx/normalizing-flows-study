@@ -48,14 +48,16 @@ class ARQS(Flow):
         # Rescale input to [0, 1]
         z_rescaled = self._rescale_to_unit(z)
         x_rescaled = torch.zeros_like(z_rescaled)
-        log_det_jacobian = torch.zeros(z.size(0), device=z.device)
+        log_det_jacobian = torch.zeros(z.size(0), device=z.device, dtype=z.dtype)
         # Sequentially compute each dimension of x
         for i in range(self.dim):
             # The conditioner's output for all dimensions depends on the input `x_rescaled`
             params = self.conditioner(x_rescaled)
             b, d = z.shape
             output_dim_per_dim = 3 * self.num_bins - 1
-            params = params.view(b, d, output_dim_per_dim)
+            # MADE groups outputs by parameter, then by dimension. Move the
+            # dimension axis ahead of the parameter axis for spline slicing.
+            params = params.view(b, output_dim_per_dim, d).transpose(1, 2)
             # Select parameters for the current dimension
             widths_i = params[:, i, :self.num_bins]
             heights_i = params[:, i, self.num_bins:2*self.num_bins]
@@ -79,36 +81,25 @@ class ARQS(Flow):
 
     def inverse(self, x):
         """
-        Inverse pass (density estimation), x -> z. This is slow and sequential.
+        Inverse pass (density estimation), x -> z. This is fast and parallel.
         """
         # Rescale input to [0, 1]
         x_rescaled = self._rescale_to_unit(x)
-        z_rescaled = torch.zeros_like(x_rescaled)
-        log_det_jacobian = torch.zeros(x.size(0), device=x.device)
-        # Sequentially compute each dimension of z
-        for i in range(self.dim):
-            # The conditioner's output for all dimensions depends on the input `z_rescaled`
-            params = self.conditioner(z_rescaled)
-            b, d = x.shape
-            output_dim_per_dim = 3 * self.num_bins - 1
-            params = params.view(b, d, output_dim_per_dim)
-            # Select parameters for the current dimension
-            widths_i = params[:, i, :self.num_bins]
-            heights_i = params[:, i, self.num_bins:2*self.num_bins]
-            derivatives_i = params[:, i, 2*self.num_bins:]
-            # Compute the inverse transformation for the current dimension
-            z_i_rescaled, log_det_i = rational_quadratic_spline(
-                inputs=x_rescaled[:, i],
-                widths=widths_i,
-                heights=heights_i,
-                derivatives=derivatives_i,
-                inverse=True
-            )
-            # Update the input for the next iteration without in-place modification
-            z_new = z_rescaled.clone()
-            z_new[:, i] = z_i_rescaled
-            z_rescaled = z_new
-            log_det_jacobian += log_det_i
+        batch_size, dim = x.shape
+        output_dim_per_dim = 3 * self.num_bins - 1
+        params = self.conditioner(x_rescaled)
+        params = params.view(batch_size, output_dim_per_dim, dim).transpose(1, 2)
+        widths = params[..., :self.num_bins]
+        heights = params[..., self.num_bins:2 * self.num_bins]
+        derivatives = params[..., 2 * self.num_bins:]
+        z_rescaled, log_det = rational_quadratic_spline(
+            inputs=x_rescaled,
+            widths=widths,
+            heights=heights,
+            derivatives=derivatives,
+            inverse=True,
+        )
+        log_det_jacobian = log_det.sum(dim=1)
         # Rescale output back to original data range
         z = self._rescale_from_unit(z_rescaled)
         return z, log_det_jacobian

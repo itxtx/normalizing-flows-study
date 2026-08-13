@@ -39,19 +39,35 @@ def rational_quadratic_spline(
     # Ensure boundary derivatives are 1
     derivatives = F.pad(derivatives, (1, 1), 'constant', 1.0)
 
-    # Find the correct bin for each input value
+    # The normalized spline is defined on [0, 1]. Outside that interval it has
+    # identity tails, which preserve global invertibility for unbounded bases.
+    inside_interval = (inputs >= 0.0) & (inputs <= 1.0)
+
+    # Find the correct bin for each input value.
     if inverse:
         # For inverse, search in y_knots (cum_heights)
         boundaries = y_knots.contiguous()
         if boundaries.dim() > 2:
             boundaries = boundaries.view(-1, boundaries.shape[-1])
-        bin_idx = torch.searchsorted(boundaries, inputs.unsqueeze(-1), right=True) - 1
+            values = inputs.contiguous().view(-1, 1)
+            bin_idx = torch.searchsorted(boundaries, values, right=True) - 1
+            bin_idx = bin_idx.view(*inputs.shape, 1)
+        else:
+            bin_idx = torch.searchsorted(
+                boundaries, inputs.contiguous().unsqueeze(-1), right=True
+            ) - 1
     else:
         # For forward, search in x_knots (cum_widths)
         boundaries = x_knots.contiguous()
         if boundaries.dim() > 2:
             boundaries = boundaries.view(-1, boundaries.shape[-1])
-        bin_idx = torch.searchsorted(boundaries, inputs.unsqueeze(-1), right=True) - 1
+            values = inputs.contiguous().view(-1, 1)
+            bin_idx = torch.searchsorted(boundaries, values, right=True) - 1
+            bin_idx = bin_idx.view(*inputs.shape, 1)
+        else:
+            bin_idx = torch.searchsorted(
+                boundaries, inputs.contiguous().unsqueeze(-1), right=True
+            ) - 1
     
     bin_idx = torch.clamp(bin_idx, 0, widths.shape[-1] - 1)
 
@@ -101,4 +117,8 @@ def rational_quadratic_spline(
         derivative = nominator_deriv / torch.clamp(denominator_deriv, min=epsilon)
         log_det = torch.log(torch.clamp(derivative, min=epsilon))
         
-    return outputs.squeeze(-1), log_det.squeeze(-1)
+    outputs = outputs.squeeze(-1)
+    log_det = log_det.squeeze(-1)
+    outputs = torch.where(inside_interval, outputs, inputs)
+    log_det = torch.where(inside_interval, log_det, torch.zeros_like(log_det))
+    return outputs, log_det

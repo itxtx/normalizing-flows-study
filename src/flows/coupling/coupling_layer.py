@@ -17,19 +17,15 @@ class CouplingLayer(Flow):
         # and output the parameters for the other part.
         self.s_net = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim)
         )
         self.b_net = nn.Sequential(
             nn.Linear(data_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, data_dim)
         )
@@ -57,14 +53,6 @@ class CouplingLayer(Flow):
         # The log-determinant of the Jacobian
         log_det_J = ((1 - self.mask) * s).sum(dim=1)
 
-        # Safety check: ensure x doesn't contain NaN or infinite values
-        x = torch.where(torch.isnan(x) | torch.isinf(x), torch.zeros_like(x), x)
-        log_det_J = torch.where(
-            torch.isnan(log_det_J) | torch.isinf(log_det_J),
-            torch.zeros_like(log_det_J),
-            log_det_J
-        )
-
         return x, log_det_J
 
     def inverse(self, x):
@@ -84,14 +72,6 @@ class CouplingLayer(Flow):
         
         # The log-determinant of the inverse Jacobian
         log_det_J_inv = ((1 - self.mask) * -s).sum(dim=1)
-
-        # Safety check: ensure z doesn't contain NaN or infinite values
-        z = torch.where(torch.isnan(z) | torch.isinf(z), torch.zeros_like(z), z)
-        log_det_J_inv = torch.where(
-            torch.isnan(log_det_J_inv) | torch.isinf(log_det_J_inv),
-            torch.zeros_like(log_det_J_inv),
-            log_det_J_inv
-        )
 
         return z, log_det_J_inv
     

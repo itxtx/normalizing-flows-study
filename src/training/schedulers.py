@@ -7,14 +7,13 @@ log-likelihood convergence and other flow-specific metrics.
 
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import _LRScheduler
 from typing import Dict, List, Optional, Union, Any
 import numpy as np
 from collections import deque
 import warnings
 
 
-class AdaptiveFlowScheduler(_LRScheduler):
+class AdaptiveFlowScheduler:
     """
     Adaptive learning rate scheduler specifically designed for normalizing flows.
     
@@ -61,7 +60,7 @@ class AdaptiveFlowScheduler(_LRScheduler):
         self.metric_history = deque(maxlen=50)
         self.gradient_history = deque(maxlen=20)
         
-        super().__init__(optimizer, last_epoch=-1)
+        self.optimizer = optimizer
     
     def step(self, metrics: Optional[Dict[str, float]] = None):
         """
@@ -100,7 +99,7 @@ class AdaptiveFlowScheduler(_LRScheduler):
         # Check if we should reduce learning rate
         if self.cooldown_counter > 0:
             self.cooldown_counter -= 1
-        elif self.num_bad_epochs >= self.patience:
+        elif self.num_bad_epochs > self.patience:
             self._reduce_lr()
             self.cooldown_counter = self.cooldown
             self.num_bad_epochs = 0
@@ -145,7 +144,7 @@ class AdaptiveFlowScheduler(_LRScheduler):
             return 'stable'
 
 
-class LogLikelihoodScheduler(_LRScheduler):
+class LogLikelihoodScheduler:
     """
     Scheduler that specifically monitors log-likelihood convergence.
     
@@ -176,7 +175,8 @@ class LogLikelihoodScheduler(_LRScheduler):
         self.epochs_without_improvement = 0
         self.converged = False
         
-        super().__init__(optimizer, last_epoch=-1)
+        self.optimizer = optimizer
+        self.last_epoch = 0
     
     def step(self, log_likelihood: float):
         """
@@ -251,7 +251,7 @@ class LogLikelihoodScheduler(_LRScheduler):
         }
 
 
-class FlowPlateauScheduler(_LRScheduler):
+class FlowPlateauScheduler:
     """
     Plateau scheduler with flow-specific enhancements.
     
@@ -304,7 +304,8 @@ class FlowPlateauScheduler(_LRScheduler):
         self.gradient_plateau_detected = False
         self.jacobian_instability_detected = False
         
-        super().__init__(optimizer, last_epoch=-1)
+        self.optimizer = optimizer
+        self.last_epoch = 0
     
     def step(self, metrics: Dict[str, float]):
         """
@@ -360,7 +361,7 @@ class FlowPlateauScheduler(_LRScheduler):
             return False
         else:
             self.num_bad_epochs += 1
-            return self.num_bad_epochs >= self.patience
+            return self.num_bad_epochs > self.patience
     
     def _check_gradient_plateau(self) -> bool:
         """Check if gradients have plateaued (very small)."""
@@ -446,7 +447,7 @@ def create_flow_scheduler(
     scheduler_type: str,
     optimizer: optim.Optimizer,
     **kwargs
-) -> _LRScheduler:
+):
     """
     Factory function to create flow-specific schedulers.
     
