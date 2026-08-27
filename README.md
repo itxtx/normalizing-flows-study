@@ -1,6 +1,6 @@
 # Normalizing Flows
 
-A from-scratch, PyTorch implementation of normalizing flows for density estimation and generative modeling, spanning coupling, autoregressive, spline, continuous (CNF), and residual flow families — with a visualization toolkit, diagnostics, and tutorial notebooks.
+A from-scratch, PyTorch implementation of normalizing flows for density estimation and generative modeling, spanning coupling, autoregressive, spline, and continuous (CNF) flow families — with a visualization toolkit, diagnostics, and tutorial notebooks.
 
 [![CI](https://github.com/itxtx/normalizing-flows-study/actions/workflows/ci.yml/badge.svg)](https://github.com/itxtx/normalizing-flows-study/actions/workflows/ci.yml)
 
@@ -71,7 +71,6 @@ All figures are reproducible from `plots/` (see [Figures](#figures)).
 | **Continuous (CNF)** | `ODEFunc`, `ContinuousFlow`, `DynamicODEFunc`, `ODEtODElFlow` | Chen et al. (2018); Grathwohl et al. (2019), *FFJORD* |
 | **Planar / Radial** | `planar_flow`, `radial_flow` | Rezende & Mohamed (2015) |
 | **Sylvester** | `sylvester_flow` | van den Berg et al. (2018) |
-| **Residual** | `residual_flow` | Behrmann et al. (2019); Chen et al. (2019) |
 | **Neural autoregressive** | `neural_autoregressive_flow` | Huang et al. (2018) |
 | **Experimental prototypes** | flow matching, shortcut, consistency, guidance, TarFlow, transformer blocks | recent flow-matching / consistency literature |
 
