@@ -135,14 +135,14 @@ See `examples/visualization_demo.py` for an end-to-end demo.
 
 ## Notebooks
 
-The notebooks are exploratory study material rather than regression-tested examples. The coupling and autoregressive notebooks contain the most theory; the continuous and spline notebooks currently need a fuller tutorial pass.
+The notebooks are compact, reproducible tutorials with explicit goals, bounded training defaults, visual inspection, numerical contract checks, and suggested follow-up experiments. They are executed during notebook maintenance but are not part of the regular pytest suite.
 
 1. [`1_Basics_Coupling_Flow.ipynb`](notebooks/1_Basics_Coupling_Flow.ipynb) — change of variables, log-likelihood, coupling flows
 2. [`2_Autoregressive_Flows.ipynb`](notebooks/2_Autoregressive_Flows.ipynb) — MADE, MAF, IAF
-3. [`3_Continous_flows.ipynb`](notebooks/3_Continous_flows.ipynb) — continuous / ODE-based flows
+3. [`3_Continuous_Flows.ipynb`](notebooks/3_Continuous_Flows.ipynb) — continuous / ODE-based flows
 4. [`4_Neural_Spline_Flows.ipynb`](notebooks/4_Neural_Spline_Flows.ipynb) — rational-quadratic spline flows
 
-For current API behavior and numerical guarantees, treat `tests/` and the reproducible scripts in `plots/` as the source of truth while the notebooks are refreshed.
+For exhaustive API and numerical guarantees, treat `tests/` and the reproducible scripts in `plots/` as the source of truth; the notebooks prioritize explanation and interactive experimentation.
 
 ## Project structure
 
