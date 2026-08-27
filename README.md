@@ -15,11 +15,11 @@ A from-scratch, PyTorch implementation of normalizing flows for density estimati
 
 ## What is this?
 
-A normalizing flow models a complex distribution $p_X(\mathbf{x})$ by learning an invertible map $f$ from a simple base distribution (a Gaussian) to the data. Because $f$ is invertible with a tractable Jacobian, you get **exact** likelihoods via the change-of-variables formula:
+A normalizing flow models a complex distribution $p_X(\mathbf{x})$ by learning an invertible map $f$ from a simple base distribution (a Gaussian) to the data. For discrete flows with a tractable Jacobian, this gives exact likelihoods via the change-of-variables formula:
 
 $$\log p_X(\mathbf{x}) = \log p_Z\big(f^{-1}(\mathbf{x})\big) + \log\left|\det \frac{\partial f^{-1}}{\partial \mathbf{x}}\right|$$
 
-This repo implements the major flow families behind that idea, each as a small, readable `nn.Module`, and builds them up into trainable models. It is meant as a study/reference codebase: every layer is documented and covered by correctness tests (invertibility, log-det vs. autodiff, gradient checks).
+This repo focuses on likelihood-based normalizing flows rather than the broader family of flow-matching, consistency, or guided generative methods. Core transforms are small, readable `nn.Module` implementations backed by correctness tests for invertibility, log-determinants, gradients, and numerical stability. Continuous flows use numerical ODE integration, so their accuracy also depends on the integration and trace-estimation settings.
 
 ## Results
 
@@ -61,19 +61,19 @@ This repo implements the major flow families behind that idea, each as a small, 
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).
 
-## Implemented flows
+## Scope and implemented flows
 
-| Family | Implementations | Reference |
-| --- | --- | --- |
-| **Coupling** | `CouplingLayer`, `RealNVP`, `SplineCouplingLayer`, `RealNVPSpline` | Dinh et al. (2017), *Density estimation using Real NVP* |
-| **Autoregressive** | `MADE`, `MaskedAutoregressiveFlow` (MAF), `InverseAutoregressiveFlow` (IAF) | Germain et al. (2015); Papamakarios et al. (2017); Kingma et al. (2016) |
-| **Neural spline** | `rational_quadratic_spline`, `ARQS` | Durkan et al. (2019), *Neural Spline Flows* |
-| **Continuous (CNF)** | `ODEFunc`, `ContinuousFlow` | Chen et al. (2018); Grathwohl et al. (2019), *FFJORD* |
-| **Planar / Radial** | `planar_flow`, `radial_flow` | Rezende & Mohamed (2015) |
-| **Sylvester** | `sylvester_flow` | van den Berg et al. (2018) |
-| **Neural autoregressive** | `neural_autoregressive_flow` | Huang et al. (2018) |
+| Status | Family | Implementations | Contract |
+| --- | --- | --- | --- |
+| **Core** | Composition | `Flow`, `SequentialFlow`, `Permutation` | Shared bidirectional interface |
+| **Core** | Coupling | `CouplingLayer`, `RealNVP` | Exact discrete transform |
+| **Core** | Autoregressive | `MADE`, MAF, IAF | Exact discrete transform; likelihood/sampling speed trade-off |
+| **Core** | Neural spline | `rational_quadratic_spline`, `SplineCouplingLayer`, `RealNVPSpline`, `ARQS` | Exact discrete transform up to numerical precision |
+| **Core, numerical** | Continuous | `ODEFunc`, `ContinuousFlow` | Numerical ODE integration; estimated trace above two dimensions |
+| **Advanced study** | Classical variational | Planar, radial, and Sylvester flows | Forward-oriented study implementations; not part of the supported bidirectional public API |
+| **Advanced study** | Deep affine autoregressive | `NeuralAutoregressiveFlow` | Experimental MADE-based implementation; not exported from `src.flows` |
 
-Models are assembled from these layers in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`).
+The supported public layers are exported from `src.flows`. Models are assembled in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`). Code under `src/flows/advanced/` is retained for focused study and does not yet promise the same bidirectional contract as the core package.
 
 ## Installation
 
@@ -121,7 +121,7 @@ z = base.sample((5000,))
 samples, _ = model.forward(z)
 ```
 
-Every flow follows the same contract: `inverse(x) -> (z, log_det)` maps data to latent for likelihood, and `forward(z) -> (x, log_det)` maps latent to data for sampling.
+Core flows follow the same interface: `inverse(x) -> (z, log_det)` maps data to latent for likelihood, and `forward(z) -> (x, log_det)` maps latent to data for sampling. `ContinuousFlow` exposes the same interface through numerical integration. Advanced study implementations may have a narrower or approximate contract.
 
 ## Visualization & diagnostics
 
@@ -135,19 +135,22 @@ See `examples/visualization_demo.py` for an end-to-end demo.
 
 ## Notebooks
 
-Tutorial notebooks in `notebooks/` build the theory up from scratch:
+The notebooks are exploratory study material rather than regression-tested examples. The coupling and autoregressive notebooks contain the most theory; the continuous and spline notebooks currently need a fuller tutorial pass.
 
-1. `1_Basics_Coupling_Flow.ipynb` — change of variables, log-likelihood, coupling flows
-2. `2_Autoregressive_Flows.ipynb` — MADE, MAF, IAF
-3. `3_Continous_flows.ipynb` — continuous / ODE-based flows
-4. `4_Neural_Spline_Flows.ipynb` — rational-quadratic spline flows
+1. [`1_Basics_Coupling_Flow.ipynb`](notebooks/1_Basics_Coupling_Flow.ipynb) — change of variables, log-likelihood, coupling flows
+2. [`2_Autoregressive_Flows.ipynb`](notebooks/2_Autoregressive_Flows.ipynb) — MADE, MAF, IAF
+3. [`3_Continous_flows.ipynb`](notebooks/3_Continous_flows.ipynb) — continuous / ODE-based flows
+4. [`4_Neural_Spline_Flows.ipynb`](notebooks/4_Neural_Spline_Flows.ipynb) — rational-quadratic spline flows
+
+For current API behavior and numerical guarantees, treat `tests/` and the reproducible scripts in `plots/` as the source of truth while the notebooks are refreshed.
 
 ## Project structure
 
 ```
 src/
   flows/            # flow layers, grouped by family
-    coupling/  autoregressive/  spline/  continuous/  advanced/
+    coupling/  autoregressive/  spline/  continuous/
+    advanced/       # forward-oriented or experimental study implementations
     optimization/   # mixed precision, gradient checkpointing, CUDA kernels
     utils/          # memory + profiling helpers
   models/           # RealNVP, RealNVPSpline, NormalizingFlowModel
