@@ -5,6 +5,7 @@ clean white background, blue = learned model, gray = data/baseline, red = accent
 Run figure scripts from the repo root after `pip install -e .`.
 """
 
+import copy
 import os
 import time
 import textwrap
@@ -179,32 +180,144 @@ LR = {"realnvp": 1e-3, "spline": 5e-4, "maf": 1e-3, "iaf": 1e-3, "cnf": 2e-2}
 NDATA = {"realnvp": 2000, "spline": 2000, "maf": 2000, "iaf": 2000, "cnf": 600}
 
 
-def base_dist(dim=2):
-    return MultivariateNormal(torch.zeros(dim), torch.eye(dim))
+def base_dist(dim=2, device=None, dtype=None):
+    return MultivariateNormal(
+        torch.zeros(dim, device=device, dtype=dtype),
+        torch.eye(dim, device=device, dtype=dtype),
+    )
 
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters())
 
 
-def train(model, data, epochs, lr=1e-3, grad_clip=5.0, record=True):
-    """Full-batch maximum-likelihood training. Returns the NLL curve (nats).
-    Skips any step whose loss is non-finite (defensive against rare blow-ups)."""
-    base = base_dist(data.shape[1])
+def train_validation_split(data, validation_fraction=0.2, seed=0):
+    """Return a deterministic train/validation split."""
+    if len(data) < 2:
+        raise ValueError("at least two samples are required")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between zero and one")
+
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(len(data), generator=generator)
+    validation_size = max(1, round(len(data) * validation_fraction))
+    validation_size = min(validation_size, len(data) - 1)
+    validation_indices = indices[:validation_size].to(data.device)
+    train_indices = indices[validation_size:].to(data.device)
+    return data[train_indices], data[validation_indices]
+
+
+@torch.no_grad()
+def negative_log_likelihood(model, data):
+    base = base_dist(data.shape[1], device=data.device, dtype=data.dtype)
+    latent, log_det = model.inverse(data)
+    return -(base.log_prob(latent) + log_det).mean()
+
+
+def train(model, train_data, validation_data, epochs, lr=1e-3, grad_clip=5.0):
+    """Train by maximum likelihood and restore the best validation checkpoint."""
+    base = base_dist(
+        train_data.shape[1], device=train_data.device, dtype=train_data.dtype
+    )
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    curve = []
-    for ep in range(epochs):
-        z, log_det = model.inverse(data)
+    train_curve = []
+    validation_curve = []
+    baseline_validation_nll = float(negative_log_likelihood(model, validation_data))
+    best_validation_nll = float("inf")
+    best_epoch = None
+    best_state = None
+    stopped_nonfinite = False
+
+    for epoch in range(epochs):
+        model.train()
+        z, log_det = model.inverse(train_data)
         loss = -(base.log_prob(z) + log_det).mean()
         if not torch.isfinite(loss):
+            stopped_nonfinite = True
             break
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         opt.step()
-        if record:
-            curve.append(float(loss.item()))
-    return curve
+
+        model.eval()
+        validation_nll = negative_log_likelihood(model, validation_data)
+        if not torch.isfinite(validation_nll):
+            stopped_nonfinite = True
+            break
+
+        train_curve.append(float(loss.item()))
+        validation_curve.append(float(validation_nll.item()))
+        if validation_nll < best_validation_nll:
+            best_validation_nll = float(validation_nll.item())
+            best_epoch = epoch
+            best_state = copy.deepcopy(model.state_dict())
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    return {
+        "train_curve": train_curve,
+        "validation_curve": validation_curve,
+        "baseline_validation_nll": baseline_validation_nll,
+        "best_validation_nll": best_validation_nll,
+        "best_epoch": best_epoch,
+        "stopped_nonfinite": stopped_nonfinite,
+    }
+
+
+@torch.no_grad()
+def validate_cache_candidate(
+    model,
+    validation_data,
+    training_result,
+    roundtrip_tolerance=5e-3,
+    logdet_tolerance=5e-3,
+):
+    """Apply the minimal quality gate used before replacing a figure cache."""
+    reasons = []
+    model.eval()
+    check_data = validation_data[: min(256, len(validation_data))]
+    latent, inverse_logdet = model.inverse(check_data)
+    reconstructed, forward_logdet = model.forward(latent)
+
+    state_finite = all(
+        not value.is_floating_point() or bool(torch.isfinite(value).all())
+        for value in model.state_dict().values()
+    )
+    outputs_finite = all(
+        bool(torch.isfinite(value).all())
+        for value in (latent, inverse_logdet, reconstructed, forward_logdet)
+    )
+    candidate_nll = float(negative_log_likelihood(model, validation_data))
+    roundtrip_error = float((reconstructed - check_data).abs().max())
+    logdet_error = float((forward_logdet + inverse_logdet).abs().max())
+    improvement = (
+        training_result["baseline_validation_nll"]
+        - training_result["best_validation_nll"]
+    )
+
+    if training_result["stopped_nonfinite"]:
+        reasons.append("training encountered a non-finite loss")
+    if not state_finite or not outputs_finite or not np.isfinite(candidate_nll):
+        reasons.append("candidate contains non-finite values")
+    if not np.isfinite(improvement) or improvement <= 0.0:
+        reasons.append("validation NLL did not improve over the untrained model")
+    if roundtrip_error > roundtrip_tolerance:
+        reasons.append("round-trip error exceeds tolerance")
+    if logdet_error > logdet_tolerance:
+        reasons.append("log-determinant cancellation error exceeds tolerance")
+
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "candidate_validation_nll": candidate_nll,
+        "validation_improvement": improvement,
+        "max_roundtrip_error": roundtrip_error,
+        "max_logdet_error": logdet_error,
+        "state_finite": state_finite,
+        "outputs_finite": outputs_finite,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -275,16 +388,25 @@ def cache_path(dataset, flow):
     return os.path.join(CACHE, f"{dataset}__{flow}.pt")
 
 
-def save_cache(dataset, flow, model, curve, train_time):
+def save_cache(dataset, flow, model, training_result, quality, train_time, seed=0):
+    if not quality["ok"]:
+        raise ValueError("refusing cache candidate: " + "; ".join(quality["reasons"]))
+
     torch.save({
         "dataset": dataset,
         "flow": flow,
         "state_dict": model.state_dict(),
-        "curve": curve,
+        "curve": training_result["train_curve"],
+        "validation_curve": training_result["validation_curve"],
         "params": count_params(model),
         "train_time": train_time,
         "sps": float(samples_per_sec(model)),
-        "final_nll": float(np.mean(curve[-20:])) if curve else None,
+        "final_nll": quality["candidate_validation_nll"],
+        "baseline_validation_nll": training_result["baseline_validation_nll"],
+        "best_validation_nll": training_result["best_validation_nll"],
+        "best_epoch": training_result["best_epoch"],
+        "quality": quality,
+        "seed": seed,
     }, cache_path(dataset, flow))
 
 

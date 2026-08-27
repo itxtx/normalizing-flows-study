@@ -18,6 +18,7 @@ import _common as C
 
 GALLERY_FLOWS = ["realnvp", "spline", "maf"]
 ALL_FLOWS = ["realnvp", "spline", "maf", "iaf", "cnf"]
+CACHE_SEED = 0
 
 
 def expand(tokens):
@@ -42,18 +43,38 @@ def expand(tokens):
 
 
 def main(tokens):
-    torch.manual_seed(0)
     pairs = expand(tokens)
     for ds, fl in pairs:
+        torch.manual_seed(CACHE_SEED)
         data = C.get_dataset(ds, n=C.NDATA.get(fl, 2000), seed=0)
+        train_data, validation_data = C.train_validation_split(
+            data, validation_fraction=0.2, seed=CACHE_SEED
+        )
         model = C.build_model(fl)
         epochs = C.EPOCHS[fl]
         t = time.time()
-        curve = C.train(model, data, epochs=epochs, lr=C.LR.get(fl, 1e-3))
+        training_result = C.train(
+            model,
+            train_data,
+            validation_data,
+            epochs=epochs,
+            lr=C.LR.get(fl, 1e-3),
+        )
         dt = time.time() - t
-        C.save_cache(ds, fl, model, curve, dt)
+        quality = C.validate_cache_candidate(model, validation_data, training_result)
+        C.save_cache(
+            ds,
+            fl,
+            model,
+            training_result,
+            quality,
+            dt,
+            seed=CACHE_SEED,
+        )
         print(f"cached {ds:13s} {fl:8s} epochs={epochs:5d} "
-              f"time={dt:5.1f}s nll={curve[-1]:7.3f} params={C.count_params(model)}")
+              f"time={dt:5.1f}s val_nll={quality['candidate_validation_nll']:7.3f} "
+              f"best_epoch={training_result['best_epoch'] + 1:4d} "
+              f"params={C.count_params(model)}")
 
 
 if __name__ == "__main__":
