@@ -68,15 +68,10 @@ All figures are reproducible from `plots/` (see [Figures](#figures)).
 | **Coupling** | `CouplingLayer`, `RealNVP`, `SplineCouplingLayer`, `RealNVPSpline` | Dinh et al. (2017), *Density estimation using Real NVP* |
 | **Autoregressive** | `MADE`, `MaskedAutoregressiveFlow` (MAF), `InverseAutoregressiveFlow` (IAF) | Germain et al. (2015); Papamakarios et al. (2017); Kingma et al. (2016) |
 | **Neural spline** | `rational_quadratic_spline`, `ARQS` | Durkan et al. (2019), *Neural Spline Flows* |
-| **Continuous (CNF)** | `ODEFunc`, `ContinuousFlow`, `DynamicODEFunc`, `ODEtODElFlow` | Chen et al. (2018); Grathwohl et al. (2019), *FFJORD* |
+| **Continuous (CNF)** | `ODEFunc`, `ContinuousFlow` | Chen et al. (2018); Grathwohl et al. (2019), *FFJORD* |
 | **Planar / Radial** | `planar_flow`, `radial_flow` | Rezende & Mohamed (2015) |
 | **Sylvester** | `sylvester_flow` | van den Berg et al. (2018) |
 | **Neural autoregressive** | `neural_autoregressive_flow` | Huang et al. (2018) |
-| **Experimental prototypes** | flow matching, shortcut, consistency, guidance, TarFlow, transformer blocks | recent flow-matching / consistency literature |
-
-Experimental prototypes live under `src/flows/advanced/`, but are intentionally
-not exported from `src.flows`: they do not yet provide the exact invertibility and
-log-determinant guarantees required by the public `Flow` contract.
 
 Models are assembled from these layers in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`).
 
