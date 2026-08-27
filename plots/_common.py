@@ -17,13 +17,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-from src.models import RealNVP, RealNVPSpline, NormalizingFlowModel
-from src.flows import (
-    MaskedAutoregressiveFlow,
-    InverseAutoregressiveFlow,
-    ContinuousFlow,
-    Permutation,
-)
+from src.models import IAF, MAF, RealNVP, RealNVPSpline
+from src.flows import ContinuousFlow
 
 # --------------------------------------------------------------------------- #
 # Style
@@ -163,15 +158,9 @@ def build_model(name, dim=2):
     if name == "spline":
         return RealNVPSpline(dim, 8, 64)
     if name == "maf":
-        layers = []
-        reverse = torch.arange(dim - 1, -1, -1)
-        for index in range(6):
-            layers.append(MaskedAutoregressiveFlow(dim, 64))
-            if index < 5:
-                layers.append(Permutation(reverse))
-        return NormalizingFlowModel(layers)
+        return MAF(dim, 6, 64)
     if name == "iaf":
-        return NormalizingFlowModel([InverseAutoregressiveFlow(dim, 64) for _ in range(6)])
+        return IAF(dim, 6, 64)
     if name == "cnf":
         return ContinuousFlow(dim, 64)
     raise ValueError(f"unknown model {name}")

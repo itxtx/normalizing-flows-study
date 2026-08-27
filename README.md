@@ -73,7 +73,7 @@ All figures are reproducible from `plots/` (see [Figures](#figures)).
 | **Advanced study** | Classical variational | Planar, radial, and Sylvester flows | Forward-oriented study implementations; not part of the supported bidirectional public API |
 | **Advanced study** | Deep affine autoregressive | `NeuralAutoregressiveFlow` | Experimental MADE-based implementation; not exported from `src.flows` |
 
-The supported public layers are exported from `src.flows`. Models are assembled in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`). Code under `src/flows/advanced/` is retained for focused study and does not yet promise the same bidirectional contract as the core package.
+The supported public layers are exported from `src.flows`. Canonical models are assembled in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`, `MAF`, `IAF`). The autoregressive model builders mix feature order between layers by default. Code under `src/flows/advanced/` is retained for focused study and does not yet promise the same bidirectional contract as the core package.
 
 ## Installation
 
@@ -153,7 +153,7 @@ src/
     advanced/       # forward-oriented or experimental study implementations
     optimization/   # mixed precision, gradient checkpointing, CUDA kernels
     utils/          # memory + profiling helpers
-  models/           # RealNVP, RealNVPSpline, NormalizingFlowModel
+  models/           # canonical RealNVP, spline, MAF, and IAF models
   training/         # learning-rate schedulers
   visualization/    # FlowVisualizer, JacobianAnalyzer, FlowDiagnostics
 tests/              # unit + correctness tests (invertibility, log-det, gradcheck)
