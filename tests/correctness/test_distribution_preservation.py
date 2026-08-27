@@ -16,6 +16,15 @@ from src.models.real_nvp import RealNVP
 from src.models.real_nvp_spline import RealNVPSpline
 from src.models.normalizing_flow_model import NormalizingFlowModel
 
+SIMPLE_FLOW_IDS = [
+    "realnvp-2",
+    "realnvp-4",
+    "realnvp-spline",
+    "coupling",
+    "maf",
+    "mixed",
+]
+
 
 def create_mask(dim, mask_type="alternating"):
     """Helper function to create masks for coupling layers."""
@@ -128,11 +137,16 @@ def train_flow(flow, data, max_steps=200, lr=1e-3):
 class TestDistributionPreservation:
     """Test distribution preservation through training."""
     
-    @pytest.mark.parametrize("flow", create_simple_flows())
-    def test_2d_gaussian_modeling(self, flow):
+    @pytest.mark.parametrize("flow_index", range(len(SIMPLE_FLOW_IDS)), ids=SIMPLE_FLOW_IDS)
+    def test_2d_gaussian_modeling(self, flow_index):
         """Test that a small NF can model 2D isotropic Gaussian data."""
         torch.manual_seed(42)
         np.random.seed(42)
+        flow = create_simple_flows()[flow_index]
+
+        # Model construction consumes random numbers; reset so every flow sees
+        # the same deterministic train/test samples.
+        torch.manual_seed(42)
         
         # Generate training data
         n_train = 1000
@@ -163,11 +177,13 @@ class TestDistributionPreservation:
         except Exception as e:
             pytest.fail(f"**critical-bug** Exception during distribution preservation test for {type(flow).__name__}: {str(e)}")
     
-    @pytest.mark.parametrize("flow", create_simple_flows())
-    def test_training_stability(self, flow):
+    @pytest.mark.parametrize("flow_index", range(len(SIMPLE_FLOW_IDS)), ids=SIMPLE_FLOW_IDS)
+    def test_training_stability(self, flow_index):
         """Test that training remains stable and doesn't produce invalid values."""
         torch.manual_seed(123)
         np.random.seed(123)
+        flow = create_simple_flows()[flow_index]
+        torch.manual_seed(123)
         
         # Generate training data
         n_train = 800
@@ -244,11 +260,13 @@ class TestDistributionPreservation:
             pytest.fail(f"**critical-bug** Baseline NLL computation incorrect: "
                       f"got {mean_empirical_nll:.3f}, expected ~{theoretical_nll:.3f} ± 1.0")
     
-    @pytest.mark.parametrize("flow", create_simple_flows()[:2])  # Test fewer flows for speed
-    def test_sample_quality(self, flow):
+    @pytest.mark.parametrize("flow_index", range(2), ids=SIMPLE_FLOW_IDS[:2])
+    def test_sample_quality(self, flow_index):
         """Test that samples from trained flow have reasonable statistics."""
         torch.manual_seed(789)
         np.random.seed(789)
+        flow = create_simple_flows()[flow_index]
+        torch.manual_seed(789)
         
         # Generate training data
         n_train = 1000

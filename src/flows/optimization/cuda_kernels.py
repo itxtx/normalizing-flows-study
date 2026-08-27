@@ -8,7 +8,6 @@ sampling.
 
 import torch
 import torch.nn as nn
-from torch.utils.cpp_extension import load_inline
 from typing import Tuple, Optional, Dict, Any
 import warnings
 import os
@@ -243,6 +242,10 @@ def _get_cuda_module():
             raise RuntimeError("CUDA is not available")
         
         try:
+            # Import extension tooling only when CUDA compilation is requested.
+            # CPU-only installs should not require setuptools just to import this module.
+            from torch.utils.cpp_extension import load_inline
+
             _cuda_module = load_inline(
                 name='flow_cuda_kernels',
                 cpp_sources=[''],

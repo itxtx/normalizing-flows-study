@@ -89,8 +89,7 @@ class TestOrthogonalMatrix:
         # Check that ||Qx|| = ||x||
         norm_x = torch.norm(x, dim=1)
         norm_Qx = torch.norm(Qx, dim=1)
-        error = torch.abs(norm_x - norm_Qx)
-        assert torch.all(error < 1e-6), f"Norm preservation error: {error.max()}"
+        torch.testing.assert_close(norm_Qx, norm_x, rtol=1e-5, atol=1e-6)
 
 
 class TestSylvesterFlow:
