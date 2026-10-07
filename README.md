@@ -61,20 +61,6 @@ This repo focuses on likelihood-based normalizing flows rather than the broader 
 
 All figures are reproducible from `plots/` (see [Figures](#figures)).
 
-## Scope and implemented flows
-
-| Status | Family | Implementations | Contract |
-| --- | --- | --- | --- |
-| **Core** | Composition | `Flow`, `SequentialFlow`, `Permutation` | Shared bidirectional interface |
-| **Core** | Coupling | `CouplingLayer`, `RealNVP` | Exact discrete transform |
-| **Core** | Autoregressive | `MADE`, MAF, IAF | Exact discrete transform; likelihood/sampling speed trade-off |
-| **Core** | Neural spline | `rational_quadratic_spline`, `SplineCouplingLayer`, `RealNVPSpline`, `ARQS` | Exact discrete transform up to numerical precision |
-| **Core, numerical** | Continuous | `ODEFunc`, `ContinuousFlow` | Numerical ODE integration; estimated trace above two dimensions |
-| **Advanced study** | Classical variational | Planar, radial, and Sylvester flows | Forward-oriented study implementations; not part of the supported bidirectional public API |
-| **Advanced study** | Deep affine autoregressive | `NeuralAutoregressiveFlow` | Experimental MADE-based implementation; not exported from `src.flows` |
-
-The supported public layers are exported from `src.flows`. Canonical models are assembled in `src/models/` (`NormalizingFlowModel`, `RealNVP`, `RealNVPSpline`, `MAF`, `IAF`). The autoregressive model builders mix feature order between layers by default. Code under `src/flows/advanced/` is retained for focused study and does not yet promise the same bidirectional contract as the core package.
-
 ## Installation
 
 ```bash
